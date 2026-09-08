@@ -32,6 +32,13 @@ interface Props {
   stats: { label: string; value: string }[];
   onActivate: (id: PanelId) => void;
   onPlayState: (id: PanelId, playing: boolean) => void;
+  /**
+   * Pre-computed decimated peaks (one array per channel). When supplied,
+   * WaveSurfer uses the MediaElement backend and skips its own decode pass,
+   * which saves a full copy of the audio in memory — critical for large files
+   * on mobile where tabs are killed around ~2 GB.
+   */
+  peaks?: Float32Array[] | number[][];
 }
 
 function palette(accent: "muted" | "brand", theme: Theme) {
@@ -55,7 +62,7 @@ function palette(accent: "muted" | "brand", theme: Theme) {
  * Pure presentation; the parent orchestrates exclusive playback.
  */
 export const WaveformPanel = forwardRef<WaveformHandle, Props>(function WaveformPanel(
-  { id, tag, label, url, accent, active, theme, stats, onActivate, onPlayState },
+  { id, tag, label, url, accent, active, theme, stats, peaks, onActivate, onPlayState },
   ref
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -83,6 +90,16 @@ export const WaveformPanel = forwardRef<WaveformHandle, Props>(function Waveform
     setPlaying(false);
 
     const colors = palette(accent, theme);
+
+    // When pre-computed peaks are available, use the MediaElement backend.
+    // This plays the audio via an <audio> element (streaming from the blob
+    // URL) rather than decoding the entire file into an AudioBuffer — a
+    // saving of hundreds of MB on long masters.
+    const hasPeaks = peaks && peaks.length > 0;
+    const peaksData: number[][] | undefined = hasPeaks
+      ? peaks.map((p) => (p instanceof Float32Array ? Array.from(p) : p))
+      : undefined;
+
     const ws = WaveSurfer.create({
       container: el,
       url,
@@ -97,6 +114,11 @@ export const WaveformPanel = forwardRef<WaveformHandle, Props>(function Waveform
       normalize: true,
       autoScroll: false,
       interact: true,
+      // WaveSurfer v7 defaults to MediaElement backend (streaming via
+      // <audio>), which never decodes the full file into memory.
+      // When peaks are provided we pass them directly so the visualisation
+      // is rendered instantly without any additional decode pass.
+      ...(hasPeaks ? { peaks: peaksData } : {}),
     });
 
     ws.on("decode", (dur) => setDuration(dur));
@@ -122,7 +144,7 @@ export const WaveformPanel = forwardRef<WaveformHandle, Props>(function Waveform
       wsRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, theme, accent]);
+  }, [url, theme, accent, peaks]);
 
   const brand = accent === "brand";
 

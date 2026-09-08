@@ -1009,3 +1009,208 @@ export async function processAudioBuffers(
 
   return new Blob([encodeWav(mastered, 24)], { type: "audio/wav" });
 }
+
+/* ------------------------------------------------------------------ */
+/* Maximum supported file size (1 GB)                                 */
+/* ------------------------------------------------------------------ */
+
+/** Hard cap: files larger than this are rejected with a clear message. */
+export const MAX_FILE_SIZE = 1 * 1024 * 1024 * 1024; // 1 GB
+
+/* ------------------------------------------------------------------ */
+/* Streaming WAV parser — reads files in chunks to avoid OOM          */
+/* ------------------------------------------------------------------ */
+
+const STREAM_CHUNK_BYTES = 2 * 1024 * 1024; // 2 MB per read
+
+/**
+ * Parse a RIFF/WAVE file from a `File` object in streaming fashion.
+ *
+ * Only the WAV header is loaded in one shot (first ~4 KB); the audio data
+ * section is then read in fixed-size chunks via `File.slice()`, converted
+ * straight into Float32Arrays without ever materialising the whole raw
+ * buffer. Peak memory ≈ decoded PCM + one chunk.
+ */
+export async function parseWavStreaming(
+  file: File,
+  onProgress?: (fraction: number) => void
+): Promise<PcmData> {
+  if (file.size < 12) throw new Error("File too small to be a WAV");
+
+  // --- Read and parse the header (first 4 KB is more than enough) -------
+  const headerSize = Math.min(8192, file.size);
+  const headerBuf = await file.slice(0, headerSize).arrayBuffer();
+  const view = new DataView(headerBuf);
+
+  const readTag = (offset: number) =>
+    String.fromCharCode(
+      view.getUint8(offset),
+      view.getUint8(offset + 1),
+      view.getUint8(offset + 2),
+      view.getUint8(offset + 3)
+    );
+
+  if (readTag(0) !== "RIFF" || readTag(8) !== "WAVE") {
+    throw new Error("Not a valid RIFF/WAVE file");
+  }
+
+  let offset = 12;
+  let format = 0;
+  let numChannels = 0;
+  let sampleRate = 0;
+  let bitsPerSample = 0;
+  let dataOffset = -1;
+  let dataLength = 0;
+
+  while (offset + 8 <= view.byteLength) {
+    const chunkId = readTag(offset);
+    const chunkSize = view.getUint32(offset + 4, true);
+    const body = offset + 8;
+
+    if (chunkId === "fmt " && body + 16 <= view.byteLength) {
+      format = view.getUint16(body, true);
+      numChannels = view.getUint16(body + 2, true);
+      sampleRate = view.getUint32(body + 4, true);
+      bitsPerSample = view.getUint16(body + 14, true);
+    } else if (chunkId === "data") {
+      dataOffset = body;
+      dataLength = Math.min(chunkSize, file.size - body);
+      break; // found data chunk — stop scanning header
+    }
+
+    offset = body + chunkSize + (chunkSize % 2);
+  }
+
+  if (format === 0) throw new Error("WAV missing fmt chunk");
+  if (dataOffset < 0) throw new Error("WAV missing data chunk");
+  if (numChannels <= 0) throw new Error("WAV has zero channels");
+  if (sampleRate <= 0) throw new Error("WAV has invalid sample rate");
+
+  const bytesPerSample = bitsPerSample / 8;
+  const frameSize = bytesPerSample * numChannels;
+  if (frameSize <= 0) throw new Error("WAV has invalid bit depth");
+
+  const totalFrames = Math.floor(dataLength / frameSize);
+  if (totalFrames <= 0) throw new Error("WAV contains no audio frames");
+
+  const isFloat = format === 3 || format === 0xfffe;
+
+  // --- Allocate output channels -----------------------------------------
+  const channels: Float32Array[] = [];
+  for (let c = 0; c < numChannels; c++) channels.push(new Float32Array(totalFrames));
+
+  // --- Stream the data section in chunks --------------------------------
+  const dataEnd = dataOffset + dataLength;
+  let readPos = dataOffset;
+  let frameIndex = 0;
+  let leftover = new Uint8Array(0);
+
+  const yieldTick = () => new Promise<void>((r) => setTimeout(r, 0));
+
+  while (readPos < dataEnd) {
+    const want = Math.min(STREAM_CHUNK_BYTES, dataEnd - readPos);
+    const slice = file.slice(readPos, readPos + want);
+    const chunkBuf = await slice.arrayBuffer();
+    const raw = new Uint8Array(chunkBuf);
+
+    // Combine any leftover bytes from the previous chunk
+    let buf: Uint8Array;
+    if (leftover.length > 0) {
+      buf = new Uint8Array(leftover.length + raw.length);
+      buf.set(leftover, 0);
+      buf.set(raw, leftover.length);
+      leftover = new Uint8Array(0);
+    } else {
+      buf = raw;
+    }
+
+    // Parse as many complete frames as possible
+    const usableBytes = Math.floor(buf.length / frameSize) * frameSize;
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    let pos = 0;
+
+    while (pos < usableBytes && frameIndex < totalFrames) {
+      for (let c = 0; c < numChannels; c++) {
+        let sample = 0;
+        if (bitsPerSample === 8) {
+          sample = (buf[pos] - 128) / 128;
+        } else if (bitsPerSample === 16) {
+          sample = dv.getInt16(pos, true) / 32768;
+        } else if (bitsPerSample === 24) {
+          const b0 = buf[pos];
+          const b1 = buf[pos + 1];
+          const b2 = buf[pos + 2];
+          let v = b0 | (b1 << 8) | (b2 << 16);
+          if (v & 0x800000) v |= ~0xffffff;
+          sample = v / 8388608;
+        } else if (bitsPerSample === 32) {
+          if (isFloat) {
+            sample = dv.getFloat32(pos, true);
+          } else {
+            sample = dv.getInt32(pos, true) / 2147483648;
+          }
+        } else if (bitsPerSample === 64) {
+          sample = dv.getFloat64(pos, true);
+        } else {
+          throw new Error(`Unsupported WAV bit depth: ${bitsPerSample}`);
+        }
+        channels[c][frameIndex] = sample;
+        pos += bytesPerSample;
+      }
+      frameIndex++;
+    }
+
+    // Stash any incomplete frame at the end for the next iteration
+    if (pos < buf.length) {
+      leftover = new Uint8Array(
+        buf.buffer as ArrayBuffer,
+        buf.byteOffset + pos,
+        buf.length - pos
+      );
+    }
+
+    readPos += want;
+    onProgress?.(Math.min(1, (readPos - dataOffset) / dataLength));
+    await yieldTick();
+  }
+
+  return { sampleRate, channels };
+}
+
+/* ------------------------------------------------------------------ */
+/* Decimated peak computation for waveform visualisation               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Compute downsampled peaks from PCM data for waveform rendering.
+ *
+ * Returns one `Float32Array` per channel, each of length `numPoints`,
+ * where each value is the max absolute amplitude within that bucket.
+ * This is the same representation WaveSurfer.js expects for its `peaks`
+ * option, so the visualisation layer never has to decode the audio.
+ */
+export function computePeaks(pcm: PcmData, numPoints: number): Float32Array[] {
+  const n = pcm.channels[0].length;
+  const points = Math.max(1, Math.min(numPoints, n));
+  const result: Float32Array[] = [];
+
+  for (const ch of pcm.channels) {
+    const peaks = new Float32Array(points);
+    const bucketSize = n / points;
+
+    for (let i = 0; i < points; i++) {
+      const start = Math.floor(i * bucketSize);
+      const end = Math.min(Math.floor((i + 1) * bucketSize), n);
+      let max = 0;
+      for (let j = start; j < end; j++) {
+        const abs = Math.abs(ch[j]);
+        if (abs > max) max = abs;
+      }
+      peaks[i] = max;
+    }
+
+    result.push(peaks);
+  }
+
+  return result;
+}

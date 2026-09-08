@@ -369,6 +369,7 @@ export function ResultsDashboard({
             accent="muted"
             active={active === "original"}
             theme={theme}
+            peaks={session.originalPeaks}
             stats={[
               { label: "LUFS", value: formatLufs(before.lufs) },
               { label: "TP", value: `${formatDb(before.truePeakDb)} dBTP` },
@@ -385,6 +386,7 @@ export function ResultsDashboard({
             accent="brand"
             active={active === "mastered"}
             theme={theme}
+            peaks={session.masteredPeaks}
             stats={[
               { label: "LUFS", value: formatLufs(after.lufs) },
               { label: "TP", value: `${formatDb(after.truePeakDb)} dBTP` },

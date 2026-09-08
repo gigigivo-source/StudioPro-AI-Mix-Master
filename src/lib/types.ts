@@ -47,6 +47,12 @@ export interface MasterSession {
   sampleRate: number;
   elapsedSec: number;
   tracks: { name: string; buffer: AudioBuffer }[];
+  /**
+   * Pre-computed decimated peaks for the A/B waveform panels.
+   * Avoids WaveSurfer decoding the (potentially huge) blob URLs a second time.
+   */
+  originalPeaks?: Float32Array[];
+  masteredPeaks?: Float32Array[];
 }
 
 export type Theme = "dark" | "light";

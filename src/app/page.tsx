@@ -2,7 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import JSZip from "jszip";
-import { masterStereoPcm, sumTracks, type PcmData } from "@/lib/client-audio-engine";
+import {
+  masterStereoPcm,
+  sumTracks,
+  parseWavStreaming,
+  computePeaks,
+  MAX_FILE_SIZE,
+  type PcmData,
+} from "@/lib/client-audio-engine";
 import { measureAll, type Metrics } from "@/lib/analysis";
 import { wavBlob } from "@/lib/exports";
 import type {
@@ -106,6 +113,9 @@ function clonePcm(pcm: PcmData): PcmData {
   };
 }
 
+/** Number of peaks to compute for waveform visualisation (≈ 1 per pixel). */
+const WAVEFORM_PEAKS = 1200;
+
 /* ------------------------------------------------------------------ */
 /* App                                                                 */
 /* ------------------------------------------------------------------ */
@@ -195,19 +205,49 @@ function StudioApp() {
       setLoadInfo({ percent: 4, message: "Reading file…" });
 
       try {
+        // ---- Validate file size (1 GB cap to avoid mobile OOM kills) ----
+        if (file.size > MAX_FILE_SIZE) {
+          const gb = (file.size / (1024 * 1024 * 1024)).toFixed(2);
+          throw new Error(
+            `File is ${gb} GB — maximum supported size is 1 GB. ` +
+            "Try splitting into smaller stems or exporting at a lower sample rate."
+          );
+        }
+
         const lower = file.name.toLowerCase();
         const isZip = lower.endsWith(".zip") || file.type.includes("zip");
 
-        let raw: { name: string; data: ArrayBuffer }[] = [];
+        /**
+         * Track payloads:
+         *  - `wav-blob`: a WAV stored as a Blob we can stream-parse (no
+         *    ArrayBuffer needed — keeps peak memory ≈ one chunk).
+         *  - `compressed`: a non-WAV format where decodeAudioData requires the
+         *    full buffer. These are kept only until decoding finishes, then
+         *    released.
+         */
+        type TrackPayload =
+          | { name: string; kind: "wav-blob"; blob: Blob; size: number }
+          | {
+              name: string;
+              kind: "compressed";
+              data: ArrayBuffer;
+              blob: Blob;
+              size: number;
+            };
+
+        const payloads: TrackPayload[] = [];
 
         if (isZip) {
+          // JSZip requires the full buffer. We release the JSZip instance
+          // and the raw buffer as soon as extraction is done so peak memory
+          // ≈ zip + one entry at a time.
           const buf = await file.arrayBuffer();
           const zip = await JSZip.loadAsync(buf);
           setLoadInfo({ percent: 12, message: "Scanning ZIP contents…" });
 
+          const entries: { name: string; entry: JSZip.JSZipObject }[] = [];
           for (const [path, entry] of Object.entries(zip.files)) {
             if (entry.dir) continue;
-            // Skip OS junk that otherwise shows up as unreadable "tracks".
             if (
               path.includes("__MACOSX") ||
               path.includes(".DS_Store") ||
@@ -217,54 +257,134 @@ function StudioApp() {
             const dot = path.lastIndexOf(".");
             const ext = dot === -1 ? "" : path.slice(dot).toLowerCase();
             if (!AUDIO_EXTENSIONS.includes(ext)) continue;
-            const data = await entry.async("arraybuffer");
-            raw.push({ name: path.split("/").pop() || path, data });
+            entries.push({ name: path.split("/").pop() || path, entry });
           }
 
-          if (raw.length === 0) {
+          if (entries.length === 0) {
             throw new Error("No audio files found in that ZIP.");
           }
+
+          // Extract entries sequentially; only one raw buffer lives at a time.
+          for (const { name, entry } of entries) {
+            const data = await entry.async("arraybuffer");
+            const dot = name.lastIndexOf(".");
+            const ext = dot === -1 ? "" : name.slice(dot).toLowerCase();
+            if (ext === ".wav") {
+              payloads.push({
+                name,
+                kind: "wav-blob",
+                blob: new Blob([data], { type: "audio/wav" }),
+                size: data.byteLength,
+              });
+            } else {
+              const mime = MIME_BY_EXTENSION[ext] ?? "audio/wav";
+              payloads.push({
+                name,
+                kind: "compressed",
+                data,
+                blob: new Blob([data], { type: mime }),
+                size: data.byteLength,
+              });
+            }
+          }
+
+          // Release the JSZip instance + raw buffer (no longer referenced).
+          // @ts-expect-error -- intentional null-out for GC
+          zip.files = null;
+
           setLoadInfo({
             percent: 18,
-            message: `${raw.length} audio file${raw.length === 1 ? "" : "s"} found`,
+            message: `${payloads.length} audio file${payloads.length === 1 ? "" : "s"} found`,
           });
         } else {
-          const data = await file.arrayBuffer();
-          raw = [{ name: file.name, data }];
+          const dot = file.name.lastIndexOf(".");
+          const ext = dot === -1 ? "" : file.name.slice(dot).toLowerCase();
+          if (ext === ".wav") {
+            // WAV — stream-parse directly from the File object; never load
+            // the entire buffer into memory.
+            payloads.push({
+              name: file.name,
+              kind: "wav-blob",
+              blob: file,
+              size: file.size,
+            });
+          } else {
+            const data = await file.arrayBuffer();
+            const mime = MIME_BY_EXTENSION[ext] ?? "audio/wav";
+            payloads.push({
+              name: file.name,
+              kind: "compressed",
+              data,
+              blob: new Blob([data], { type: mime }),
+              size: data.byteLength,
+            });
+          }
           setLoadInfo({ percent: 18, message: "Audio file found" });
         }
 
         const ctx = getAudioContext();
         const tracks: TrackInfo[] = [];
-        for (let i = 0; i < raw.length; i++) {
-          const f = raw[i];
+
+        for (let i = 0; i < payloads.length; i++) {
+          const p = payloads[i];
           setLoadInfo({
-            percent: 18 + 72 * (i / raw.length),
-            message: `Decoding ${f.name}…`,
+            percent: 18 + 72 * (i / payloads.length),
+            message: `Decoding ${p.name}…`,
           });
 
           let buffer: AudioBuffer;
+
           try {
-            // Copy: decodeAudioData may detach the buffer in some engines.
-            buffer = await ctx.decodeAudioData(f.data.slice(0));
+            if (p.kind === "wav-blob") {
+              // Stream-parse WAV without ever loading the whole file.
+              // Blob.slice() works on File and Blob identically.
+              const pcm = await parseWavStreaming(
+                p.blob as unknown as File,
+                (f) => {
+                  setLoadInfo({
+                    percent:
+                      18 + 72 * ((i + f * 0.9) / payloads.length),
+                    message: `Reading ${p.name}…`,
+                  });
+                }
+              );
+              buffer = ctx.createBuffer(
+                pcm.channels.length,
+                pcm.channels[0].length,
+                pcm.sampleRate
+              );
+              for (let c = 0; c < pcm.channels.length; c++) {
+                // copyToChannel's type expects Float32Array<ArrayBuffer>;
+                // our streaming parser always allocates plain ArrayBuffers
+                // (never SharedArrayBuffer), so this cast is safe and avoids
+                // an unnecessary copy of potentially hundreds of MB.
+                buffer.copyToChannel(pcm.channels[c] as any, c);
+              }
+              // Release the temporary Float32Arrays — only the AudioBuffer
+              // survives.
+              pcm.channels.length = 0;
+            } else {
+              // Compressed format — decodeAudioData needs the whole buffer,
+              // but compressed files are small. Drop `data` after decoding.
+              const copy = p.data.slice(0);
+              buffer = await ctx.decodeAudioData(copy);
+              // @ts-expect-error -- intentional null-out for GC
+              p.data = null;
+            }
           } catch {
             toast({
               type: "error",
-              title: `Skipped “${f.name}”`,
-              message: "Could not decode this file — it was left out of the session.",
+              title: `Skipped "${p.name}"`,
+              message:
+                "Could not decode this file — it was left out of the session.",
             });
             continue;
           }
 
-          const dot = f.name.lastIndexOf(".");
-          const ext = dot === -1 ? "" : f.name.slice(dot).toLowerCase();
-          const mime = MIME_BY_EXTENSION[ext] ?? "audio/wav";
-          const url = rememberTrackUrl(
-            URL.createObjectURL(new Blob([f.data], { type: mime }))
-          );
+          const url = rememberTrackUrl(URL.createObjectURL(p.blob));
           tracks.push({
-            name: f.name,
-            size: f.data.byteLength,
+            name: p.name,
+            size: p.size,
             duration: buffer.duration,
             url,
             buffer,
@@ -276,7 +396,9 @@ function StudioApp() {
           throw new Error("No decodable audio files found.");
         }
 
-        const totalDuration = Math.max(...tracks.map((t) => t.duration));
+        const totalDuration = Math.max(
+          ...tracks.map((t) => t.duration)
+        );
         setProject({
           fileName: file.name,
           fileSize: file.size,
@@ -330,11 +452,19 @@ function StudioApp() {
 
     try {
       /* ---- Stage 1: MIXING (0-10%) ---- */
-      report(2, "mixing", `Summing ${project.tracks.length} track${project.tracks.length === 1 ? "" : "s"} to stereo bus…`);
+      report(
+        2,
+        "mixing",
+        `Summing ${project.tracks.length} track${project.tracks.length === 1 ? "" : "s"} to stereo bus…`
+      );
       await tick(80);
 
+      // Convert AudioBuffers to PcmData and drop the per-track copies as soon
+      // as the sum is computed — the summed stereo bus is all we need.
       const pcmTracks = project.tracks.map((t) => toPcm(t.buffer));
       const originalPcm = sumTracks(pcmTracks);
+      // Release per-track PCM — only the summed bus survives.
+      pcmTracks.length = 0;
 
       report(7, "mixing", MIXING_STATUS(0));
       const before: Metrics = await measureAll(originalPcm, (f) =>
@@ -368,10 +498,21 @@ function StudioApp() {
       const masterWav = wavBlob(masteredPcm, 24);
       const originalWav = wavBlob(originalPcm, 16);
 
+      report(98, "qc", "Computing waveform peaks…");
+      await tick(16);
+      // Decimated peaks for the A/B panels — WaveSurfer will never have to
+      // decode the (potentially huge) blob URLs itself.
+      const originalPeaks = computePeaks(originalPcm, WAVEFORM_PEAKS);
+      const masteredPeaks = computePeaks(masteredPcm, WAVEFORM_PEAKS);
+
       report(99, "qc", "Preparing A/B comparison…");
       await tick(60);
-      const masteredUrl = rememberSessionUrl(URL.createObjectURL(masterWav));
-      const originalUrl = rememberSessionUrl(URL.createObjectURL(originalWav));
+      const masteredUrl = rememberSessionUrl(
+        URL.createObjectURL(masterWav)
+      );
+      const originalUrl = rememberSessionUrl(
+        URL.createObjectURL(originalWav)
+      );
       report(100, "qc", "Quality check passed");
 
       const frames = masteredPcm.channels[0].length;
@@ -386,7 +527,12 @@ function StudioApp() {
         durationSec: frames / masteredPcm.sampleRate,
         sampleRate: masteredPcm.sampleRate,
         elapsedSec: (performance.now() - startedAt) / 1000,
-        tracks: project.tracks.map((t) => ({ name: t.name, buffer: t.buffer })),
+        tracks: project.tracks.map((t) => ({
+          name: t.name,
+          buffer: t.buffer,
+        })),
+        originalPeaks,
+        masteredPeaks,
       };
 
       await tick(350);
