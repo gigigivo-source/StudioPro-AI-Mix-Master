@@ -1,13 +1,12 @@
-import { db } from "@/db";
-import { sql } from "drizzle-orm";
-
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  try {
-    await db.execute(sql`select 1`);
-    return Response.json({ ok: true });
-  } catch {
-    return Response.json({ ok: false }, { status: 500 });
-  }
+  // Local-first mode: no database required
+  return Response.json({
+    ok: true,
+    mode: "local-first",
+    database: "disabled",
+    message: "App is running in browser-local mode, no database needed",
+    timestamp: new Date().toISOString(),
+  });
 }
