@@ -58,7 +58,7 @@ export interface DecodedTrackInput {
 const LOUDNESS_TARGETS: Record<string, number> = {
   SPOTIFY: -14.0,
   APPLE_MUSIC: -16.0,
-  YOUTUBE: -13.0,
+  YOUTUBE: -14.0,
   CD: -9.0,
   // Legacy aliases
   LOW: -16.0,

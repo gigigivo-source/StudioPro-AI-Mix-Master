@@ -1,0 +1,4 @@
+/** Shimmering placeholder block for loading states. */
+export function Skeleton({ className = "" }: { className?: string }) {
+  return <div className={`skeleton rounded-lg ${className}`} aria-hidden />;
+}

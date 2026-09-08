@@ -1,1 +1,537 @@
 @import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/space-grotesk";
+
+/* ------------------------------------------------------------------ *\
+ * StudioPro design tokens
+ * Dark theme is the default; [data-theme="light"] switches the palette.
+ * ------------------------------------------------------------------ */
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --sp-bg-1: #0a0a0f;
+  --sp-bg-2: #1a1a2e;
+
+  --sp-accent: #6c63ff;
+  --sp-aqua: #00d4ff;
+
+  --sp-ink: #f4f5fb;
+  --sp-mut: rgba(226, 230, 255, 0.62);
+  --sp-faint: rgba(226, 230, 255, 0.38);
+
+  --sp-line: rgba(255, 255, 255, 0.09);
+  --sp-line-strong: rgba(255, 255, 255, 0.2);
+
+  --sp-surface: rgba(255, 255, 255, 0.045);
+  --sp-surface-2: rgba(255, 255, 255, 0.085);
+  --sp-surface-3: rgba(255, 255, 255, 0.14);
+
+  --sp-glow: rgba(108, 99, 255, 0.45);
+  --sp-glow-aqua: rgba(0, 212, 255, 0.35);
+  --sp-tip-bg: #14172b;
+  --sp-tip-line: rgba(255, 255, 255, 0.14);
+  --sp-shimmer: rgba(255, 255, 255, 0.09);
+
+  --sp-ok: #34e1b0;
+  --sp-warn: #ffb454;
+  --sp-err: #ff5c7a;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --sp-bg-1: #f7f8fd;
+  --sp-bg-2: #e6e9f8;
+
+  --sp-accent: #5a50f0;
+  --sp-aqua: #009fd0;
+
+  --sp-ink: #14162b;
+  --sp-mut: rgba(20, 22, 43, 0.64);
+  --sp-faint: rgba(20, 22, 43, 0.4);
+
+  --sp-line: rgba(20, 22, 43, 0.11);
+  --sp-line-strong: rgba(20, 22, 43, 0.24);
+
+  --sp-surface: rgba(255, 255, 255, 0.74);
+  --sp-surface-2: rgba(20, 22, 43, 0.05);
+  --sp-surface-3: rgba(20, 22, 43, 0.1);
+
+  --sp-glow: rgba(90, 80, 240, 0.35);
+  --sp-glow-aqua: rgba(0, 159, 208, 0.28);
+  --sp-tip-bg: #ffffff;
+  --sp-tip-line: rgba(20, 22, 43, 0.14);
+  --sp-shimmer: rgba(255, 255, 255, 0.55);
+
+  --sp-ok: #0aa87c;
+  --sp-warn: #d97b0a;
+  --sp-err: #e12d4f;
+}
+
+/* Map tokens into Tailwind v4 utilities (bg-surface, text-ink, border-line, ...) */
+@theme inline {
+  --color-ink: var(--sp-ink);
+  --color-mut: var(--sp-mut);
+  --color-faint: var(--sp-faint);
+  --color-line: var(--sp-line);
+  --color-line-strong: var(--sp-line-strong);
+  --color-surface: var(--sp-surface);
+  --color-surface2: var(--sp-surface-2);
+  --color-surface3: var(--sp-surface-3);
+  --color-accent: var(--sp-accent);
+  --color-aqua: var(--sp-aqua);
+  --color-ok: var(--sp-ok);
+  --color-warn: var(--sp-warn);
+  --color-err: var(--sp-err);
+
+  --font-sans: "Inter Variable", "Inter", ui-sans-serif, system-ui,
+    -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Space Grotesk Variable", "Space Grotesk",
+    "Inter Variable", "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* ------------------------------------------------------------------ *\
+ * Base
+ * ------------------------------------------------------------------ */
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  color: var(--sp-ink);
+  font-family: var(--font-sans);
+  background:
+    radial-gradient(1100px 700px at 85% -10%, rgba(108, 99, 255, 0.16), transparent 60%),
+    radial-gradient(900px 640px at -10% 25%, rgba(0, 212, 255, 0.09), transparent 55%),
+    linear-gradient(160deg, var(--sp-bg-1) 0%, var(--sp-bg-2) 100%);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+:root[data-theme="light"] body {
+  background:
+    radial-gradient(1100px 700px at 85% -10%, rgba(108, 99, 255, 0.1), transparent 60%),
+    radial-gradient(900px 640px at -10% 25%, rgba(0, 212, 255, 0.08), transparent 55%),
+    linear-gradient(160deg, var(--sp-bg-1) 0%, var(--sp-bg-2) 100%);
+}
+
+::selection {
+  background: rgba(108, 99, 255, 0.4);
+  color: var(--sp-ink);
+}
+
+:focus-visible {
+  outline: 2px solid var(--sp-accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Slim studio scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--sp-surface-3) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--sp-surface-3);
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ------------------------------------------------------------------ *\
+ * Components
+ * ------------------------------------------------------------------ */
+
+/* Frosted-glass card */
+.glass {
+  background: var(--sp-surface);
+  border: 1px solid var(--sp-line);
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+}
+
+.glass-strong {
+  background: color-mix(in srgb, var(--sp-surface) 70%, transparent);
+  border: 1px solid var(--sp-line);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+}
+
+.text-gradient {
+  background: linear-gradient(92deg, var(--sp-accent) 0%, var(--sp-aqua) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Primary CTA */
+.btn-primary {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 14px;
+  background: linear-gradient(94deg, var(--sp-accent) 0%, #8a5cff 48%, var(--sp-aqua) 130%);
+  color: #fff;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  box-shadow:
+    0 10px 30px -10px var(--sp-glow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  transition: transform 0.15s ease, box-shadow 0.2s ease, filter 0.2s ease;
+}
+.btn-primary:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow:
+    0 16px 40px -10px var(--sp-glow),
+    0 0 34px -6px var(--sp-glow-aqua),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  filter: brightness(1.06);
+}
+.btn-primary:active:not(:disabled) {
+  transform: translateY(0) scale(0.99);
+}
+.btn-primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Ghost / secondary button */
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 12px;
+  border: 1px solid var(--sp-line);
+  background: var(--sp-surface);
+  color: var(--sp-ink);
+  font-weight: 500;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+.btn-ghost:hover:not(:disabled) {
+  border-color: var(--sp-line-strong);
+  background: var(--sp-surface-2);
+  transform: translateY(-1px);
+}
+.btn-ghost:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Icon button */
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  color: var(--sp-mut);
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+.btn-icon:hover {
+  color: var(--sp-ink);
+  background: var(--sp-surface-2);
+  border-color: var(--sp-line);
+}
+
+/* Selected accent ring used by genre cards, target buttons, panels */
+.ring-accent {
+  border-color: var(--sp-accent) !important;
+  background: linear-gradient(180deg, rgba(108, 99, 255, 0.16), rgba(0, 212, 255, 0.07)) !important;
+  box-shadow:
+    0 0 0 1px var(--sp-accent),
+    0 8px 28px -12px var(--sp-glow);
+}
+
+/* Skeleton shimmer */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--sp-surface-2);
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--sp-shimmer), transparent);
+  animation: sp-shimmer 1.5s infinite;
+}
+@keyframes sp-shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* Animated progress sheen */
+.sheen {
+  position: relative;
+  overflow: hidden;
+}
+.sheen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(105deg, transparent 40%, rgba(255, 255, 255, 0.35) 50%, transparent 60%);
+  animation: sp-sheen 1.5s linear infinite;
+}
+@keyframes sp-sheen {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* Drag-over pulse for the upload zone */
+@keyframes sp-drop-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 0 rgba(108, 99, 255, 0.5),
+      0 0 44px -12px rgba(0, 212, 255, 0.5);
+  }
+  50% {
+    box-shadow:
+      0 0 0 14px rgba(108, 99, 255, 0),
+      0 0 64px -8px rgba(0, 212, 255, 0.6);
+  }
+}
+.drag-active {
+  border-color: var(--sp-accent) !important;
+  animation: sp-drop-pulse 1.3s ease-in-out infinite;
+}
+
+/* Equalizer bars (active stage / live indicator) */
+.eq {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2.5px;
+  height: 14px;
+}
+.eq span {
+  width: 3px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--sp-aqua), var(--sp-accent));
+  transform-origin: bottom;
+  animation: sp-eq 0.9s ease-in-out infinite;
+}
+.eq span:nth-child(1) { height: 45%; animation-delay: 0s; }
+.eq span:nth-child(2) { height: 90%; animation-delay: 0.15s; }
+.eq span:nth-child(3) { height: 60%; animation-delay: 0.3s; }
+.eq span:nth-child(4) { height: 100%; animation-delay: 0.45s; }
+.eq span:nth-child(5) { height: 55%; animation-delay: 0.6s; }
+@keyframes sp-eq {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+/* Active-stage breathing ring */
+@keyframes sp-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(108, 99, 255, 0.55), 0 0 26px -6px var(--sp-glow);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(108, 99, 255, 0.12), 0 0 34px -4px var(--sp-glow);
+  }
+}
+.breathe {
+  animation: sp-breathe 1.6s ease-in-out infinite;
+}
+
+/* Live status dot */
+@keyframes sp-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.blink {
+  animation: sp-blink 1.2s ease-in-out infinite;
+}
+
+/* Entrance animations */
+@keyframes sp-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.fade-up {
+  animation: sp-fade-up 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes sp-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.toast-in {
+  animation: sp-toast-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes sp-pop {
+  0% {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  70% {
+    transform: scale(1.06);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.pop {
+  animation: sp-pop 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* ------------------------------------------------------------------ *\
+ * Range slider (mixing intensity)
+ * ------------------------------------------------------------------ */
+
+input[type="range"].sp-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--sp-accent) 0%,
+    var(--sp-aqua) var(--fill, 50%),
+    var(--sp-surface-2) var(--fill, 50%)
+  );
+  outline: none;
+  cursor: pointer;
+}
+input[type="range"].sp-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  border: 3px solid var(--sp-accent);
+  box-shadow: 0 0 14px rgba(108, 99, 255, 0.75);
+  cursor: grab;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+input[type="range"].sp-range::-webkit-slider-thumb:hover {
+  transform: scale(1.18);
+  box-shadow: 0 0 20px rgba(108, 99, 255, 0.95);
+}
+input[type="range"].sp-range:active::-webkit-slider-thumb {
+  cursor: grabbing;
+}
+input[type="range"].sp-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: 3px solid var(--sp-accent);
+  box-shadow: 0 0 14px rgba(108, 99, 255, 0.75);
+  cursor: grab;
+}
+
+/* ------------------------------------------------------------------ *\
+ * Switch (vocal focus)
+ * ------------------------------------------------------------------ */
+
+.sp-switch {
+  position: relative;
+  width: 46px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--sp-surface-3);
+  border: 1px solid var(--sp-line);
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+  flex: none;
+}
+.sp-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.sp-switch[data-on="true"] {
+  background: linear-gradient(90deg, var(--sp-accent), var(--sp-aqua));
+  border-color: transparent;
+  box-shadow: 0 0 18px -4px var(--sp-glow);
+}
+.sp-switch[data-on="true"]::after {
+  transform: translateX(20px);
+}
+
+/* ------------------------------------------------------------------ *\
+ * Misc
+ * ------------------------------------------------------------------ */
+
+/* Tooltip (CSS-only, via .group/tt + .tt-bubble in markup) */
+.tt-bubble {
+  opacity: 0;
+  transform: translate(-50%, 4px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  pointer-events: none;
+}
+.group\/tt:hover .tt-bubble,
+.group\/tt:focus-within .tt-bubble {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+/* Hide number input arrows (just in case) */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
