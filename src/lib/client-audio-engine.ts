@@ -205,12 +205,24 @@ export function parseWav(arrayBuffer: ArrayBuffer): PcmData {
       view.getUint8(offset + 3)
     );
 
-  if (arrayBuffer.byteLength < 12) throw new Error("File too small to be a WAV");
-  if (readTag(0) !== "RIFF" || readTag(8) !== "WAVE") {
+  // Tolerate an optional ID3v2 tag in front of the RIFF block.
+  let riffStart = 0;
+  if (arrayBuffer.byteLength >= 10 && readTag(0).slice(0, 3) === "ID3") {
+    const id3Size =
+      ((view.getUint8(6) & 0x7f) << 21) |
+      ((view.getUint8(7) & 0x7f) << 14) |
+      ((view.getUint8(8) & 0x7f) << 7) |
+      (view.getUint8(9) & 0x7f);
+    riffStart = 10 + id3Size;
+  }
+  if (arrayBuffer.byteLength < riffStart + 12) {
+    throw new Error("File too small to be a WAV");
+  }
+  if (readTag(riffStart) !== "RIFF" || readTag(riffStart + 8) !== "WAVE") {
     throw new Error("Not a valid RIFF/WAVE file");
   }
 
-  let offset = 12;
+  let offset = riffStart + 12;
   let format = 0;
   let numChannels = 0;
   let sampleRate = 0;
@@ -408,6 +420,14 @@ export function toStereo(pcm: PcmData): PcmData {
   return { sampleRate: pcm.sampleRate, channels: [left, right] };
 }
 
+/** Deep-copy a PCM (independent channel arrays) — used for A/B work copies. */
+export function clonePcm(pcm: PcmData): PcmData {
+  return {
+    sampleRate: pcm.sampleRate,
+    channels: pcm.channels.map((c) => new Float32Array(c)),
+  };
+}
+
 /**
  * Sum tracks into one stereo PCM. Resamples to the highest input rate and pads
  * shorter tracks with silence so nothing is truncated.
@@ -418,6 +438,14 @@ export function sumTracks(tracks: PcmData[]): PcmData {
   const targetRate = Math.max(...tracks.map((t) => t.sampleRate));
   const stereo = tracks.map((t) => toStereo(resample(t, targetRate)));
   const length = Math.max(...stereo.map((t) => t.channels[0].length));
+
+  // Memory fast path: summing a single track is an identity op (gain = 1/√1),
+  // so when it is already stereo at the target rate we return it in place
+  // instead of allocating a full second copy of the audio. This halves the
+  // pipeline's peak memory for single-file projects.
+  if (stereo.length === 1 && stereo[0] === tracks[0]) {
+    return stereo[0];
+  }
 
   const left = new Float32Array(length);
   const right = new Float32Array(length);

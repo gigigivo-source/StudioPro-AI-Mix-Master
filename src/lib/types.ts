@@ -16,15 +16,20 @@ export interface Settings {
   vocalFocus: boolean;
 }
 
+/**
+ * A loaded track. The decoded PCM is the single source of truth — there is
+ * no AudioBuffer and no raw-byte copy kept alongside it. Playback preview
+ * URLs are generated lazily (see file-loader.buildPreviewWav) and revoked
+ * when they are no longer needed.
+ */
 export interface TrackInfo {
   name: string;
   /** Bytes. */
   size: number;
   /** Seconds. */
   duration: number;
-  /** Blob URL for raw preview playback. */
-  url: string;
-  buffer: AudioBuffer;
+  /** Decoded float32 PCM (the only copy of the audio we keep). */
+  pcm: PcmData;
 }
 
 export interface Project {
@@ -35,18 +40,22 @@ export interface Project {
   totalDuration: number;
 }
 
+/**
+ * A finished mastering session. The two PCM buffers are the working set for
+ * A/B comparison and exports. Preview URLs and waveform peaks are resolved
+ * lazily by the results dashboard (never created eagerly) so that a large
+ * master does not add multi-hundred-MB blobs to memory on completion.
+ */
 export interface MasterSession {
   settings: Settings;
   originalPcm: PcmData;
-  originalUrl: string;
   masteredPcm: PcmData;
-  masteredUrl: string;
   before: Metrics;
   after: Metrics;
   durationSec: number;
   sampleRate: number;
   elapsedSec: number;
-  tracks: { name: string; buffer: AudioBuffer }[];
+  tracks: { name: string; pcm: PcmData }[];
 }
 
 export type Theme = "dark" | "light";

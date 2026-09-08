@@ -1,10 +1,22 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AlertTriangle, X } from "lucide-react";
 import JSZip from "jszip";
-import { masterStereoPcm, sumTracks, type PcmData } from "@/lib/client-audio-engine";
+import { clonePcm, masterStereoPcm, sumTracks, type PcmData } from "@/lib/client-audio-engine";
+import {
+  buildPreviewWav,
+  decodeNonWavBytes,
+  decodeNonWavFile,
+  decodeWavBytes,
+  estimateProjectPeakBytes,
+  memoryVerdict,
+  MEMORY_REJECT_MESSAGE,
+  MEMORY_WARNING_MESSAGE,
+  parseWavStreaming,
+  readWavHeader,
+} from "@/lib/file-loader";
 import { measureAll, type Metrics } from "@/lib/analysis";
-import { wavBlob } from "@/lib/exports";
 import type {
   MasterSession,
   Phase,
@@ -39,18 +51,7 @@ const AUDIO_EXTENSIONS = [
   ".webm",
 ];
 
-const MIME_BY_EXTENSION: Record<string, string> = {
-  ".wav": "audio/wav",
-  ".mp3": "audio/mpeg",
-  ".flac": "audio/flac",
-  ".ogg": "audio/ogg",
-  ".m4a": "audio/mp4",
-  ".aac": "audio/aac",
-  ".aiff": "audio/aiff",
-  ".aif": "audio/aiff",
-  ".opus": "audio/ogg",
-  ".webm": "audio/webm",
-};
+const WAV_EXTENSIONS = [".wav"];
 
 const TARGET_LUFS_LABEL: Record<string, string> = {
   SPOTIFY: "−14 LUFS",
@@ -91,20 +92,10 @@ const QC_STATUS = (f: number): string =>
 
 const tick = (ms = 0) => new Promise<void>((r) => setTimeout(r, ms));
 
-function toPcm(buffer: AudioBuffer): PcmData {
-  const channels: Float32Array[] = [];
-  for (let c = 0; c < buffer.numberOfChannels; c++) {
-    channels.push(new Float32Array(buffer.getChannelData(c)));
-  }
-  return { sampleRate: buffer.sampleRate, channels };
-}
-
-function clonePcm(pcm: PcmData): PcmData {
-  return {
-    sampleRate: pcm.sampleRate,
-    channels: pcm.channels.map((c) => new Float32Array(c)),
-  };
-}
+const extOf = (name: string): string => {
+  const dot = name.lastIndexOf(".");
+  return dot === -1 ? "" : name.slice(dot).toLowerCase();
+};
 
 /* ------------------------------------------------------------------ */
 /* App                                                                 */
@@ -130,12 +121,16 @@ function StudioApp() {
   }>({ progress: 0, stage: "mixing", status: "" });
   const [eta, setEta] = useState<number | null>(null);
   const [session, setSession] = useState<MasterSession | null>(null);
+  /** Large-file warning shown as a confirm dialog before processing. */
+  const [memoryWarning, setMemoryWarning] = useState<string | null>(null);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
-  /** Track preview URLs die with the project; session preview URLs die with the session. */
-  const trackUrlsRef = useRef<string[]>([]);
-  const sessionUrlsRef = useRef<string[]>([]);
   const progressRef = useRef({ p: 0, t: 0, rate: 0 });
+  /**
+   * Track preview URLs are generated lazily (compact 22.05 kHz / 16-bit
+   * previews) and revoked as soon as they are no longer needed.
+   */
+  const previewUrlsRef = useRef<Map<number, string>>(new Map());
 
   /* ---------------- audio context ---------------- */
 
@@ -150,45 +145,43 @@ function StudioApp() {
     return audioCtxRef.current;
   }, []);
 
-  /* ---------------- blob URL bookkeeping ---------------- */
+  /* ---------------- preview URL bookkeeping ---------------- */
 
-  const rememberTrackUrl = useCallback((url: string) => {
-    trackUrlsRef.current.push(url);
-    return url;
+  const releasePreviewUrls = useCallback(() => {
+    previewUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
+    previewUrlsRef.current.clear();
   }, []);
-
-  const rememberSessionUrl = useCallback((url: string) => {
-    sessionUrlsRef.current.push(url);
-    return url;
-  }, []);
-
-  const releaseTrackUrls = useCallback(() => {
-    trackUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
-    trackUrlsRef.current = [];
-  }, []);
-
-  const releaseSessionUrls = useCallback(() => {
-    sessionUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
-    sessionUrlsRef.current = [];
-  }, []);
-
-  const releaseAllUrls = useCallback(() => {
-    releaseTrackUrls();
-    releaseSessionUrls();
-  }, [releaseSessionUrls, releaseTrackUrls]);
 
   useEffect(
     () => () => {
-      releaseAllUrls();
+      releasePreviewUrls();
     },
-    [releaseAllUrls]
+    [releasePreviewUrls]
+  );
+
+  /**
+   * Lazily build (and cache) a compact playback preview for a track.
+   * Nothing is created at upload time — only when the user actually plays.
+   */
+  const getPreviewUrl = useCallback(
+    async (index: number): Promise<string> => {
+      const cached = previewUrlsRef.current.get(index);
+      if (cached) return cached;
+      const track = project?.tracks[index];
+      if (!track) throw new Error("Track no longer available");
+      const blob = await buildPreviewWav(track.pcm);
+      const url = URL.createObjectURL(blob);
+      previewUrlsRef.current.set(index, url);
+      return url;
+    },
+    [project]
   );
 
   /* ---------------- load a project (ZIP or single audio file) ---------------- */
 
   const loadProject = useCallback(
     async (file: File) => {
-      releaseAllUrls();
+      releasePreviewUrls();
       setSession(null);
       setProject(null);
       setPhase("loading");
@@ -197,14 +190,26 @@ function StudioApp() {
       try {
         const lower = file.name.toLowerCase();
         const isZip = lower.endsWith(".zip") || file.type.includes("zip");
+        const isWav = !isZip && WAV_EXTENSIONS.includes(extOf(lower));
 
-        let raw: { name: string; data: ArrayBuffer }[] = [];
+        const ctx = getAudioContext();
+        const tracks: TrackInfo[] = [];
+
+        /** Exact memory gate, re-evaluated after every decoded track. */
+        const memoryGuard = () =>
+          memoryVerdict(estimateProjectPeakBytes(tracks.map((t) => t.pcm))).level ===
+          "reject";
 
         if (isZip) {
-          const buf = await file.arrayBuffer();
-          const zip = await JSZip.loadAsync(buf);
+          // JSZip needs the whole archive to parse the central directory —
+          // this is the one unavoidable full-file read (ZIPs, not WAVs).
+          // The buffer is dropped right after the archive is parsed.
+          let zipBuf: ArrayBuffer | null = await file.arrayBuffer();
+          const zip = await JSZip.loadAsync(zipBuf);
+          zipBuf = null;
           setLoadInfo({ percent: 12, message: "Scanning ZIP contents…" });
 
+          const entries: { path: string; entry: JSZip.JSZipObject }[] = [];
           for (const [path, entry] of Object.entries(zip.files)) {
             if (entry.dir) continue;
             // Skip OS junk that otherwise shows up as unreadable "tracks".
@@ -214,62 +219,102 @@ function StudioApp() {
               path.startsWith(".")
             )
               continue;
-            const dot = path.lastIndexOf(".");
-            const ext = dot === -1 ? "" : path.slice(dot).toLowerCase();
+            const ext = extOf(path);
             if (!AUDIO_EXTENSIONS.includes(ext)) continue;
-            const data = await entry.async("arraybuffer");
-            raw.push({ name: path.split("/").pop() || path, data });
+            entries.push({ path, entry });
           }
 
-          if (raw.length === 0) {
+          if (entries.length === 0) {
             throw new Error("No audio files found in that ZIP.");
           }
-          setLoadInfo({
-            percent: 18,
-            message: `${raw.length} audio file${raw.length === 1 ? "" : "s"} found`,
-          });
-        } else {
-          const data = await file.arrayBuffer();
-          raw = [{ name: file.name, data }];
-          setLoadInfo({ percent: 18, message: "Audio file found" });
-        }
 
-        const ctx = getAudioContext();
-        const tracks: TrackInfo[] = [];
-        for (let i = 0; i < raw.length; i++) {
-          const f = raw[i];
-          setLoadInfo({
-            percent: 18 + 72 * (i / raw.length),
-            message: `Decoding ${f.name}…`,
-          });
-
-          let buffer: AudioBuffer;
-          try {
-            // Copy: decodeAudioData may detach the buffer in some engines.
-            buffer = await ctx.decodeAudioData(f.data.slice(0));
-          } catch {
-            toast({
-              type: "error",
-              title: `Skipped “${f.name}”`,
-              message: "Could not decode this file — it was left out of the session.",
-            });
-            continue;
+          // Rough early gate from uncompressed entry sizes so a 32-stem
+          // bundle is rejected before a single stem is decoded. WAV float
+          // PCM is ≤ 2× raw; compressed sources can expand up to ~4×.
+          let estPcm = 0;
+          for (const { entry } of entries) {
+            const size =
+              (entry as unknown as { _data?: { uncompressedSize?: number } })._data
+                ?.uncompressedSize ?? 0;
+            estPcm += size > 0 ? size * (extOf(entry.name) === ".wav" ? 2 : 4) : 0;
+          }
+          const estPeak = estPcm + 2 * (estPcm / Math.max(1, entries.length)) + 64 * 1024 * 1024;
+          if (memoryVerdict(estPeak).level === "reject") {
+            throw new Error(MEMORY_REJECT_MESSAGE);
           }
 
-          const dot = f.name.lastIndexOf(".");
-          const ext = dot === -1 ? "" : f.name.slice(dot).toLowerCase();
-          const mime = MIME_BY_EXTENSION[ext] ?? "audio/wav";
-          const url = rememberTrackUrl(
-            URL.createObjectURL(new Blob([f.data], { type: mime }))
-          );
-          tracks.push({
-            name: f.name,
-            size: f.data.byteLength,
-            duration: buffer.duration,
-            url,
-            buffer,
+          // Extract + decode ONE entry at a time; its raw bytes are dropped
+          // before the next entry is touched.
+          for (let i = 0; i < entries.length; i++) {
+            const { path, entry } = entries[i];
+            const name = path.split("/").pop() || path;
+            setLoadInfo({
+              percent: 12 + 80 * (i / entries.length),
+              message: `Extracting ${name} (${i + 1}/${entries.length})…`,
+            });
+
+            const data = await entry.async("arraybuffer");
+            try {
+              if (WAV_EXTENSIONS.includes(extOf(name))) {
+                // Streaming-capable parser on the extracted bytes — converted
+                // in 32 MiB chunks with yields, then the bytes are released.
+                const { pcm, header } = await decodeWavBytes(data);
+                tracks.push({ name, size: data.byteLength, duration: header.durationSec, pcm });
+              } else {
+                const { pcm, durationSec } = await decodeNonWavBytes(data, ctx);
+                tracks.push({ name, size: data.byteLength, duration: durationSec, pcm });
+              }
+            } catch {
+              toast({
+                type: "error",
+                title: `Skipped “${name}”`,
+                message: "Could not decode this file — it was left out of the session.",
+              });
+              continue;
+            }
+            // The entry's raw bytes are now released before the next
+            // extraction; only the decoded PCM (the one copy we keep) lives
+            // in `tracks`.
+            if (memoryGuard()) {
+              releasePreviewUrls();
+              tracks.length = 0;
+              throw new Error(MEMORY_REJECT_MESSAGE);
+            }
+            await tick(16);
+          }
+        } else if (isWav) {
+          // WAV: never read the whole file. Header first (a few hundred KB),
+          // then stream the data chunk in 32 MiB slices straight into the
+          // float32 channel arrays.
+          setLoadInfo({ percent: 8, message: "Reading WAV header…" });
+          const header = await readWavHeader(file);
+
+          // Single track: the summed bus shares the track arrays (zero-copy
+          // sum), so peak ≈ 2× decoded PCM + headroom.
+          const peak = header.pcmBytes * 2 + 64 * 1024 * 1024;
+          const verdict = memoryVerdict(peak);
+          if (verdict.level === "reject") {
+            throw new Error(MEMORY_REJECT_MESSAGE);
+          }
+          // "warn" is re-checked (and confirmed by the user) at process time.
+
+          setLoadInfo({ percent: 8, message: "Streaming WAV data…" });
+          const { pcm } = await parseWavStreaming(file, {
+            onProgress: (f) =>
+              setLoadInfo({ percent: 8 + f * 84, message: "Streaming WAV data…" }),
           });
-          await tick(16);
+          tracks.push({ name: file.name, size: file.size, duration: header.durationSec, pcm });
+        } else {
+          // Non-WAV single file (MP3/FLAC/…): Web Audio decoding needs the
+          // bytes; they are held only for the decode call (see file-loader).
+          setLoadInfo({ percent: 8, message: "Decoding audio…" });
+          const { pcm, durationSec } = await decodeNonWavFile(file, ctx);
+          tracks.push({ name: file.name, size: file.size, duration: durationSec, pcm });
+          if (memoryGuard()) {
+            releasePreviewUrls();
+            tracks.length = 0;
+            throw new Error(MEMORY_REJECT_MESSAGE);
+          }
         }
 
         if (tracks.length === 0) {
@@ -292,19 +337,24 @@ function StudioApp() {
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        releaseAllUrls();
+        releasePreviewUrls();
         setProject(null);
         setLoadInfo(null);
         setPhase("idle");
-        toast({ type: "error", title: "Could not read file", message });
+        toast({
+          type: "error",
+          title: message === MEMORY_REJECT_MESSAGE ? "File too large" : "Could not read file",
+          message,
+        });
       }
     },
-    [getAudioContext, rememberTrackUrl, releaseAllUrls, toast]
+    [getAudioContext, releasePreviewUrls, toast]
   );
 
   /* ---------------- mastering pipeline ---------------- */
 
-  const startProcess = useCallback(async () => {
+  /** The actual processing work (runs after the memory gate passes). */
+  const runPipeline = useCallback(async () => {
     if (!project || phase === "processing") return;
 
     setPhase("processing");
@@ -333,7 +383,9 @@ function StudioApp() {
       report(2, "mixing", `Summing ${project.tracks.length} track${project.tracks.length === 1 ? "" : "s"} to stereo bus…`);
       await tick(80);
 
-      const pcmTracks = project.tracks.map((t) => toPcm(t.buffer));
+      // Tracks already hold decoded PCM (no AudioBuffer copies here). A
+      // single-track project sums in place (zero-copy fast path).
+      const pcmTracks: PcmData[] = project.tracks.map((t) => t.pcm);
       const originalPcm = sumTracks(pcmTracks);
 
       report(7, "mixing", MIXING_STATUS(0));
@@ -342,11 +394,11 @@ function StudioApp() {
       );
 
       /* ---- Stage 2: MASTERING (10-88%) ---- */
-      const lufsLabel =
-        TARGET_LUFS_LABEL[settings.loudness] ?? settings.loudness;
+      const lufsLabel = TARGET_LUFS_LABEL[settings.loudness] ?? settings.loudness;
       report(10, "mastering", "Initializing mastering chain…");
 
       // Master a copy — originalPcm stays intact for the A/B comparison.
+      // The engine processes this in 0.25 s chunks, yielding to the UI.
       const work = clonePcm(originalPcm);
       const masteredPcm = await masterStereoPcm(work, {
         genre: settings.genre,
@@ -363,30 +415,24 @@ function StudioApp() {
         report(88 + f * 9, "qc", QC_STATUS(f))
       );
 
-      report(97, "qc", "Rendering master WAV…");
+      report(97, "qc", "Preparing A/B comparison…");
       await tick(60);
-      const masterWav = wavBlob(masteredPcm, 24);
-      const originalWav = wavBlob(originalPcm, 16);
 
-      report(99, "qc", "Preparing A/B comparison…");
-      await tick(60);
-      const masteredUrl = rememberSessionUrl(URL.createObjectURL(masterWav));
-      const originalUrl = rememberSessionUrl(URL.createObjectURL(originalWav));
-      report(100, "qc", "Quality check passed");
+      // No eager WAV blobs and no preview URLs here: the results dashboard
+      // resolves compact previews + pre-computed peaks lazily on demand.
+      releasePreviewUrls();
 
       const frames = masteredPcm.channels[0].length;
       const newSession: MasterSession = {
         settings: { ...settings },
         originalPcm,
-        originalUrl,
         masteredPcm,
-        masteredUrl,
         before,
         after,
         durationSec: frames / masteredPcm.sampleRate,
         sampleRate: masteredPcm.sampleRate,
         elapsedSec: (performance.now() - startedAt) / 1000,
-        tracks: project.tracks.map((t) => ({ name: t.name, buffer: t.buffer })),
+        tracks: project.tracks.map((t) => ({ name: t.name, pcm: t.pcm })),
       };
 
       await tick(350);
@@ -404,23 +450,44 @@ function StudioApp() {
       setPhase(project ? "ready" : "idle");
       toast({ type: "error", title: "Processing failed", message });
     }
-  }, [project, phase, settings, rememberSessionUrl, toast]);
+  }, [project, phase, settings, releasePreviewUrls, toast]);
+
+  /** Memory gate + confirmation, then the pipeline. */
+  const handleMixClick = useCallback(() => {
+    if (!project || phase === "processing") return;
+    const verdict = memoryVerdict(estimateProjectPeakBytes(project.tracks.map((t) => t.pcm)));
+    if (verdict.level === "reject") {
+      toast({
+        type: "error",
+        title: "File too large",
+        message: MEMORY_REJECT_MESSAGE,
+      });
+      return;
+    }
+    if (verdict.level === "warn") {
+      setMemoryWarning(MEMORY_WARNING_MESSAGE);
+      return;
+    }
+    void runPipeline();
+  }, [project, phase, toast, runPipeline]);
 
   /* ---------------- project lifecycle ---------------- */
 
   const clearProject = useCallback(() => {
-    releaseAllUrls();
+    releasePreviewUrls();
     setProject(null);
     setSession(null);
     setLoadInfo(null);
     setPhase("idle");
-  }, [releaseAllUrls]);
+  }, [releasePreviewUrls]);
 
   const remaster = useCallback(() => {
-    releaseSessionUrls(); // drops the session's preview URLs only
+    // Session preview URLs/peaks live in the results dashboard and are
+    // revoked with it; track previews are regenerated lazily on demand.
+    releasePreviewUrls();
     setSession(null);
     setPhase("ready");
-  }, [releaseSessionUrls]);
+  }, [releasePreviewUrls]);
 
   /* ---------------- render ---------------- */
 
@@ -451,6 +518,7 @@ function StudioApp() {
                 <TrackList
                   tracks={project?.tracks ?? null}
                   loading={phase === "loading"}
+                  getPreviewUrl={getPreviewUrl}
                 />
               )}
             </div>
@@ -472,7 +540,7 @@ function StudioApp() {
                 <SettingsPanel
                   settings={settings}
                   onChange={(patch) => setSettings((s) => ({ ...s, ...patch }))}
-                  onProcess={() => void startProcess()}
+                  onProcess={handleMixClick}
                   disabled={phase === "loading"}
                   hasProject={!!project && phase === "ready"}
                 />
@@ -486,6 +554,67 @@ function StudioApp() {
         StudioPro — professional mix &amp; master · runs 100% in your browser ·
         audio never leaves your device
       </footer>
+
+      {/* ---------------- Large-file confirmation ---------------- */}
+      {memoryWarning && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+          onClick={() => setMemoryWarning(null)}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Large file warning"
+        >
+          <div
+            className="glass w-full max-w-md rounded-2xl p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <span
+                className="flex h-10 w-10 flex-none items-center justify-center rounded-xl"
+                style={{
+                  background: "rgba(255, 196, 0, 0.15)",
+                  border: "1px solid rgba(255, 196, 0, 0.35)",
+                  color: "#ffc400",
+                }}
+              >
+                <AlertTriangle size={18} />
+              </span>
+              <div className="min-w-0 flex-1">
+                <h3 className="font-display text-base font-bold text-ink">
+                  Large file detected
+                </h3>
+                <p className="mt-1.5 text-[13px] leading-relaxed text-mut">
+                  {memoryWarning}
+                </p>
+              </div>
+              <button
+                className="btn-icon h-7 w-7 flex-none"
+                onClick={() => setMemoryWarning(null)}
+                aria-label="Close"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                className="btn-ghost px-4 py-2.5 text-sm"
+                onClick={() => setMemoryWarning(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn-primary px-4 py-2.5 text-sm"
+                onClick={() => {
+                  setMemoryWarning(null);
+                  void runPipeline();
+                }}
+              >
+                Continue anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -23,9 +23,15 @@ import { Tooltip } from "@/components/ui/Tooltip";
 import { useToast } from "@/components/Toast";
 import {
   WaveformPanel,
+  type PanelAssets,
   type PanelId,
   type WaveformHandle,
 } from "@/components/WaveformPanel";
+import {
+  buildPreviewWav,
+  computePeaks,
+  MAX_WAVEFORM_PEAKS,
+} from "@/lib/file-loader";
 import {
   baseName,
   buildPdfReport,
@@ -185,6 +191,53 @@ export function ResultsDashboard({
     (id: PanelId, isPlaying: boolean) =>
       setPlaying((p) => ({ ...p, [id]: isPlaying })),
     []
+  );
+
+  /*
+   * A/B playback assets are resolved lazily (first play / "Show Waveform"):
+   * pre-computed peaks (≤ 2000 per channel — no full decode) plus a compact
+   * 22.05 kHz / 16-bit preview URL. The preview Blob URLs are revoked when
+   * the dashboard unmounts (remaster / new project).
+   */
+  const assetsRef = useRef<Partial<Record<PanelId, PanelAssets>>>({});
+  const previewUrlsRef = useRef<Partial<Record<PanelId, string>>>({});
+
+  useEffect(
+    () => () => {
+      (["original", "mastered"] as PanelId[]).forEach((k) => {
+        const url = previewUrlsRef.current[k];
+        if (url) URL.revokeObjectURL(url);
+      });
+    },
+    []
+  );
+
+  const resolvePanelAssets = useCallback(
+    async (which: PanelId): Promise<PanelAssets> => {
+      const cached = assetsRef.current[which];
+      if (cached) return cached;
+      const pcm = which === "original" ? session.originalPcm : session.masteredPcm;
+      const [peaks, preview] = await Promise.all([
+        computePeaks(pcm, MAX_WAVEFORM_PEAKS),
+        buildPreviewWav(pcm),
+      ]);
+      const url = URL.createObjectURL(preview);
+      previewUrlsRef.current[which] = url;
+      const assets: PanelAssets = { url, peaks };
+      assetsRef.current[which] = assets;
+      return assets;
+    },
+    [session]
+  );
+
+  /* Stable identities so the panels' effects don't re-run on every render. */
+  const resolveOriginalAssets = useCallback(
+    () => resolvePanelAssets("original"),
+    [resolvePanelAssets]
+  );
+  const resolveMasteredAssets = useCallback(
+    () => resolvePanelAssets("mastered"),
+    [resolvePanelAssets]
   );
 
   /* Exclusive playback: starting one panel pauses the other. */
@@ -365,7 +418,7 @@ export function ResultsDashboard({
             id="original"
             tag="A"
             label="Original"
-            url={session.originalUrl}
+            duration={session.durationSec}
             accent="muted"
             active={active === "original"}
             theme={theme}
@@ -373,6 +426,7 @@ export function ResultsDashboard({
               { label: "LUFS", value: formatLufs(before.lufs) },
               { label: "TP", value: `${formatDb(before.truePeakDb)} dBTP` },
             ]}
+            resolveAssets={resolveOriginalAssets}
             onActivate={setActive}
             onPlayState={playState}
           />
@@ -381,7 +435,7 @@ export function ResultsDashboard({
             id="mastered"
             tag="B"
             label="Mastered"
-            url={session.masteredUrl}
+            duration={session.durationSec}
             accent="brand"
             active={active === "mastered"}
             theme={theme}
@@ -389,6 +443,7 @@ export function ResultsDashboard({
               { label: "LUFS", value: formatLufs(after.lufs) },
               { label: "TP", value: `${formatDb(after.truePeakDb)} dBTP` },
             ]}
+            resolveAssets={resolveMasteredAssets}
             onActivate={setActive}
             onPlayState={playState}
           />

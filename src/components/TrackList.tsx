@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Music, Pause, Play } from "lucide-react";
+import { Loader2, Music, Pause, Play } from "lucide-react";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { EqualizerBars } from "@/components/ui/EqualizerBars";
 import { formatBytes, formatDuration } from "@/lib/format";
@@ -9,17 +9,24 @@ import type { TrackInfo } from "@/lib/types";
 
 /**
  * Per-track raw preview list. One shared <audio> element; only one row
- * plays at a time. Shows skeleton rows while the project is decoding.
+ * plays at a time. Preview URLs are built lazily (compact 22.05 kHz /
+ * 16-bit WAV) the first time a row is played — never at upload time — and
+ * revoked by the owner when the project is cleared. Shows skeleton rows
+ * while the project is decoding.
  */
 export function TrackList({
   tracks,
   loading,
+  getPreviewUrl,
 }: {
   tracks: TrackInfo[] | null;
   loading: boolean;
+  getPreviewUrl: (index: number) => Promise<string>;
 }) {
   const audioRef = useRef<HTMLAudioElement>(null);
+  const genRef = useRef(0);
   const [playingIndex, setPlayingIndex] = useState<number | null>(null);
+  const [preparingIndex, setPreparingIndex] = useState<number | null>(null);
 
   // Stop any preview when the list goes away.
   useEffect(() => {
@@ -29,7 +36,7 @@ export function TrackList({
     };
   }, []);
 
-  const toggle = (index: number, url: string) => {
+  const toggle = async (index: number) => {
     const el = audioRef.current;
     if (!el) return;
     if (playingIndex === index) {
@@ -37,11 +44,20 @@ export function TrackList({
       setPlayingIndex(null);
       return;
     }
-    if (el.src !== url) {
-      el.src = url;
+    const gen = ++genRef.current;
+    setPreparingIndex(index);
+    try {
+      const url = await getPreviewUrl(index);
+      if (gen !== genRef.current) return; // superseded by a newer click
+      if (el.src !== url) el.src = url;
+      await el.play();
+      if (gen !== genRef.current) return;
+      setPlayingIndex(index);
+    } catch {
+      if (gen === genRef.current) setPlayingIndex(null);
+    } finally {
+      if (gen === genRef.current) setPreparingIndex(null);
     }
-    void el.play().catch(() => setPlayingIndex(null));
-    setPlayingIndex(index);
   };
 
   if (loading || !tracks) {
@@ -86,6 +102,7 @@ export function TrackList({
       <ul className="max-h-64 space-y-1.5 overflow-y-auto pr-1">
         {tracks.map((t, i) => {
           const isPlaying = playingIndex === i;
+          const isPreparing = preparingIndex === i;
           return (
             <li
               key={`${t.name}-${i}`}
@@ -111,11 +128,17 @@ export function TrackList({
               </div>
               {isPlaying && <EqualizerBars className="mr-1 hidden sm:inline-flex" />}
               <button
-                onClick={() => toggle(i, t.url)}
+                onClick={() => void toggle(i)}
                 className="btn-icon h-8 w-8 flex-none rounded-full border border-line bg-surface2"
                 aria-label={isPlaying ? `Pause ${t.name}` : `Play ${t.name}`}
               >
-                {isPlaying ? <Pause size={13} /> : <Play size={13} className="ml-0.5" />}
+                {isPreparing ? (
+                  <Loader2 size={13} className="animate-spin" />
+                ) : isPlaying ? (
+                  <Pause size={13} />
+                ) : (
+                  <Play size={13} className="ml-0.5" />
+                )}
               </button>
             </li>
           );

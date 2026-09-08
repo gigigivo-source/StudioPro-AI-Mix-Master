@@ -5,7 +5,7 @@
  *          -> clonePcm -> masterStereoPcm -> measureAll (after)
  *          -> wavBlob 16/24 -> encodeMp3(320) -> buildStemsZip
  */
-import { masterStereoPcm, sumTracks, type PcmData } from "../src/lib/client-audio-engine.ts";
+import { clonePcm, masterStereoPcm, sumTracks, type PcmData } from "../src/lib/client-audio-engine.ts";
 import { measureAll } from "../src/lib/analysis.ts";
 import { wavBlob, encodeMp3, buildStemsZip, baseName } from "../src/lib/exports.ts";
 
@@ -48,11 +48,6 @@ function makeBuffer(freq: number, seconds: number, sampleRate = 44100): AudioBuf
 const toPcm = (b: AudioBuffer): PcmData => ({
   sampleRate: b.sampleRate,
   channels: Array.from({ length: b.numberOfChannels }, (_, c) => new Float32Array(b.getChannelData(c))),
-});
-
-const clonePcm = (pcm: PcmData): PcmData => ({
-  sampleRate: pcm.sampleRate,
-  channels: pcm.channels.map((c) => new Float32Array(c)),
 });
 
 const t0 = Date.now();
@@ -109,9 +104,19 @@ if (typeof lameNs.Mp3Encoder !== "function") {
 }
 console.log("lamejs: Mp3Encoder resolved via ESM import condition ✓");
 
-const zip = await buildStemsZip(tracks.map((b, i) => ({ name: `drum_${i}.wav`, buffer: b })));
+const zip = await buildStemsZip(tracks.map((b, i) => ({ name: `drum_${i}.wav`, pcm: toPcm(b) })));
 console.log(`Stems ZIP: ${(zip.size / 1024).toFixed(1)} KB`);
 if (zip.size < 100_000) throw new Error("ZIP suspiciously small");
+
+// --- Memory fast path: a single stereo track at target rate sums in place ---
+const single = toPcm(tracks[0]);
+const summedSingle = sumTracks([single]);
+if (summedSingle !== single) throw new Error("single-track sum should be zero-copy");
+
+// --- clonePcm independence (work copy must not share channel storage) ---
+const copy = clonePcm(single);
+copy.channels[0][0] = 999;
+if (single.channels[0][0] === 999) throw new Error("clonePcm shared storage");
 
 console.log(`baseName("my song (final).zip") = ${baseName("my song (final).zip")}`);
 console.log(`\nPIPELINE OK in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
