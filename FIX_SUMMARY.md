@@ -1,124 +1,165 @@
-# Fix Summary: Remove Database Code - Local-First Mode
+# Fix Summary: Remove Database + Demo Tracks - User Audio Only
 
-## Problem
-App was showing error:
+## Problems Fixed
+
+### 1. Database Error (First Fix)
 `Failed query: select "id", "name", ... from "projects" where "projects"."id" = $1`
+- App tried to query PostgreSQL but is local-first browser app
+- Fixed by removing ALL database code
 
-This happened because `/api/process` was trying to query a PostgreSQL `projects` table, but this is a **local-first browser app** that shouldn't use a database at all.
+### 2. Demo Tracks Bug (Critical Fix)
+When user uploads FL Studio Mobile ZIP, app processed DEMO TRACKS instead of user's actual audio.
+- Fixed by removing ALL demo/sample/fallback audio
 
 ## Solution Applied
 
-### 1. Removed ALL database dependencies
+### A. Removed ALL Database Dependencies
 **File: `package.json`**
 - Removed `drizzle-orm`, `pg`, `@types/pg`, `drizzle-kit`, `dotenv`
-- Now only uses: `next`, `react`, `react-dom`, `jszip`, `lucide-react`, `canvas-confetti`
 
-**Deleted files:**
+**Deleted:**
 - `drizzle.config.json`
-- `src/db/index.ts` (Pool + drizzle init)
-- `src/db/schema.ts` (projects table definition)
+- `src/db/index.ts` (Pool + drizzle)
+- `src/db/schema.ts` (projects table)
 
-### 2. Fixed `/api/health` route
-**Before:** Tried `db.execute(sql`select 1`)` - failed without DATABASE_URL
-**After:** Returns local-first status directly:
-```ts
-export async function GET() {
-  return Response.json({
-    ok: true,
-    mode: "local-first",
-    database: "disabled",
-    message: "App is running in browser-local mode, no database needed"
-  });
-}
-```
+**Fixed routes:**
+- `/api/health` → Returns `{ ok: true, mode: "local-first", database: "disabled" }`
+- `/api/project` → Returns empty list with local-first message
+- `/api/process` → Returns JSON directly without DB
+- `/api/upload` → Parses without DB insert
 
-### 3. Fixed `/api/process` route (MAIN FIX)
+### B. Removed ALL Demo Tracks - Force User Audio Only
+
+#### 1. Removed Demo Definitions (DELETED)
+- `demoStems` array (10 tracks: 01_Sub_808.wav, 02_Kick_Punch.wav, etc. - Midnight_Drift_FLM_Export)
+- `fallbackNames` array (Drums_Bus.wav, Bass_808.wav, etc.)
+- `Master_Stem_01.wav` fallback
+- Virtual placeholders `02_Bass_Support.wav`, `03_Drum_Percussion.wav`
+
+#### 2. Removed Demo Fallback Logic (REPLACED WITH ERROR)
 **Before:**
 ```ts
-import { db } from "@/db";
-import { projects } from "@/db/schema";
-import { eq } from "drizzle-orm";
-const [existing] = await db.select().from(projects).where(eq(projects.id, projectId));
-await db.update(projects).set({...})
-await db.insert(processingLogs)...
+if (!tracks || tracks.length === 0) { tracks = DEMO_TRACKS; }
+// or
+if (audioFiles.length === 0) { tracksMeta = fallbackNames.map(...) }
 ```
 
-**After:** Stateless, no DB query at all:
+**After:**
 ```ts
-import { AudioProductionEngine } from "@/lib/roex-engine";
-import { runQualityAssuranceGate } from "@/lib/qa-engine";
-// No drizzle, no pg imports
-
-export async function POST(req) {
-  const { projectId, projectName, trackCount, bpm, musicalStyle, ... } = await req.json();
-  // Determine target LUFS directly
-  // Run engine.renderMixAndMaster()
-  // Run runQualityAssuranceGate()
-  // Return JSON directly without saving to DB
-  return NextResponse.json({ success: true, qcReport, masterAudioUrl, ... mode: "local-first" });
+if (!tracks || tracks.length === 0) {
+  return NextResponse.json(
+    { error: "No audio tracks found in your upload. Please check your ZIP file." },
+    { status: 400 }
+  );
 }
 ```
 
-### 4. Fixed `/api/upload` route
-**Before:** Imported db and tried to insert project + logs
-**After:** Parses ZIP/FLM and returns metadata directly, no DB insert
+**Upload route now:**
+- Requires file, else 400 error
+- If `demo=true` flag → 400 error "Demo mode has been removed. Please upload your own..."
+- Single audio file → processes ONLY that file, no virtual placeholders
+- Direct .flm upload without audio → 400 error with clear message
+- ZIP with no audio → 400 error with supported formats list
+- ZIP parsing fails → 400 error, no fallback
 
-### 5. Fixed `/api/project` route
-**Before:** Queried `db.select().from(projects)`
-**After:** Returns empty list with local-first message - projects live in browser memory
+#### 3. Removed Demo UI Elements
+**File: `src/app/page.tsx`**
+- Deleted `handleLoadDemo()` function
+- Deleted "Load Demo FLM Project" button from header
+- Deleted "Quick Demo Options" section ("No ZIP handy?" + "Try Interactive Studio Demo" button)
+- Removed `Zap`, `Wand2`, `Info` unused imports
+- Updated header badge to "User Audio Only • No Demo Tracks" + "Local-First Mode"
+- Updated hero banner: "YOUR FL Studio Mobile Projects" + "Processes ONLY your uploaded files - no demo tracks"
+- Updated drag & drop zone: "Drag & Drop YOUR FL Studio Mobile ZIP" + "✓ No demo tracks • ✓ No fallback samples • ✓ Your audio only"
+- Updated file input accept: `.zip,.flm,.wav,.mp3,.flac,.ogg,.m4a,.aac,.aiff,.aif`
+- Improved error handling: shows "No audio tracks found..." alert for 400 errors
 
-### 6. Updated `src/app/page.tsx`
-- Now sends `projectName`, `bpm`, `trackCount` to `/api/process` so process route doesn't need DB lookup
+#### 4. Ensured ZIP Extraction Works (User Audio Only)
+- Recursively extracts ALL audio files from ZIP, including subfolders (FL Studio Mobile puts stems in folders)
+- Supported: WAV, MP3, FLAC, OGG, M4A, AAC, AIFF, AIF
+- Ignores system junk: __MACOSX, .DS_Store, Thumbs.db, hidden files
+- Parses .flm if present for BPM/key metadata (optional, not required)
+- If FLM parsing fails, still extracts and uses raw audio files
+- Preserves full path: `fullPath: "Drums/Kick.wav"`, `fileName: "Kick.wav"`, `originalPath`
+- Flags: `isUserUploaded: true`, `source: "user-upload-only"`
 
-## Verification
+#### 5. Process ONLY User-Uploaded Audio
+- `/api/process` validates `projectId` required
+- Validates `tracks` array not empty, else 400 error
+- Determines `trackCount` from user data only
+- No demo fallback under ANY circumstances
+- Returns: `source: "user-audio-only"`, `message: "Successfully processed X user-uploaded track(s). No demo audio used."`
+
+### C. Other Cleanups
+- Fixed `roex-engine.ts`: Changed `demo_roex_studio_pro_key` to `local_studio_pro_key`
+- Added `.gitignore` for `node_modules`, `.next`, etc.
+
+## Verification Tests
+
 ```bash
-curl http://localhost:3000/api/health
-# {"ok":true,"mode":"local-first","database":"disabled",...}
-
+# Demo flag blocked
 curl -X POST -F "demo=true" http://localhost:3000/api/upload
-# {"success":true,"projectId":"proj_...","tracks":[...],"mode":"local-first"}
+# {"error":"Demo mode has been removed. Please upload your own..."}
 
-curl -X POST http://localhost:3000/api/process -H "Content-Type: application/json" -d '{"projectId":"test","trackCount":10,"musicalStyle":"HIP_HOP"}'
-# {"success":true,"engineUsed":"RoEx Tonn API...","qcReport":{...},"mode":"local-first"}
+# Empty ZIP error
+curl -X POST -F "file=@empty.zip" http://localhost:3000/api/upload
+# {"error":"No audio tracks found in your upload. Please check your ZIP file. Supported formats: WAV, MP3, FLAC, OGG, M4A, AAC, AIFF..."}
+
+# User ZIP with subfolders - SUCCESS
+# ZIP containing: Drums/Kick.wav, Drums/Snare.wav, Bass/Bassline.wav, Vocals/My_Vocal_Take_01.wav
+curl -X POST -F "file=@user_real.zip" http://localhost:3000/api/upload
+# {"success":true,"projectName":"user_real","tracks":[{"fileName":"Kick.wav","fullPath":"Drums/Kick.wav","isUserUploaded":true},...],"message":"Successfully extracted 4 audio track(s) from your upload."}
+
+# Process only user audio
+curl -X POST http://localhost:3000/api/process -d '{"projectId":"...","trackCount":4,"tracks":[...]}'
+# {"success":true,"source":"user-audio-only","trackCount":4,"message":"Successfully processed 4 user-uploaded track(s). No demo audio used."}
+
+# Process with no tracks error
+curl -X POST http://localhost:3000/api/process -d '{"projectId":"test","trackCount":0}'
+# {"error":"No audio tracks found in your upload. Please check your ZIP file. Cannot process without user audio."}
 ```
 
-No more `Failed query: select ... from "projects"` errors.
+## Acceptance Criteria
+- [x] No demo or sample audio files remain in codebase (grep CLEAN)
+- [x] Uploading ZIP with audio extracts and processes user's files (including subfolders)
+- [x] Uploading ZIP without audio shows clear error "No audio tracks found..."
+- [x] App never plays or processes demo tracks (demo UI removed, API blocks demo flag)
+- [x] UI shows only user's uploaded track names (isUserUploaded flag, fullPath preserved)
+- [x] No database code (health returns local-first, no drizzle/pg imports)
+- [x] Build succeeds: ✓ Compiled successfully
 
 ## Arena Preview
-App is running on port 3000:
+App running on port 3000:
 - Local: http://localhost:3000
-- Preview: https://3000-{sandboxId}.e2b.app (click LIVE PREVIEW in Arena)
+- Preview: https://3000-{sandboxId}.e2b.app (LIVE PREVIEW button)
 
-## Termux Deployment (Copy-Paste)
-
-For Termux on Android:
+## Termux Deployment
 
 ```bash
-# 1. Clone fixed version
+# Clone fixed version (no database, no demo tracks, user audio only)
 git clone https://github.com/gigigivo-source/StudioPro-AI-Mix-Master.git
 cd StudioPro-AI-Mix-Master
 git checkout arena/01a08036-studiopro-ai-mix-master
 
-# 2. Install dependencies (no database needed!)
+# Install (no DATABASE_URL needed!)
 npm install
 
-# 3. Run dev server
+# Run
 npm run dev -- -H 0.0.0.0 -p 3000
+# Open http://localhost:3000
 
-# 4. Open in browser:
-# http://localhost:3000
+# Test: Upload YOUR FL Studio Mobile ZIP - it will extract YOUR files only
+# If you upload empty ZIP, you'll see: "No audio tracks found in your upload. Please check your ZIP file."
 ```
 
-Or if you already have the app in Termux, just replace these 4 files with the fixed versions from this repo:
-- `src/app/api/health/route.ts`
-- `src/app/api/process/route.ts`
-- `src/app/api/upload/route.ts`
-- `src/app/api/project/route.ts`
-
-And delete:
-- `src/db/` folder
-- `drizzle.config.json`
-
-Then edit `package.json` to remove `drizzle-orm`, `pg`, `drizzle-kit`.
-
-No DATABASE_URL env var needed anymore!
+## Files Changed
+- `src/app/api/upload/route.ts` - Complete rewrite: user audio only, recursive extraction, no demo fallback
+- `src/app/api/process/route.ts` - Validate user tracks, no demo fallback, error handling
+- `src/app/page.tsx` - Remove demo UI, update banner, improve error handling, accept all formats
+- `src/app/api/health/route.ts` - Local-first without DB
+- `src/app/api/project/route.ts` - Local-first without DB
+- `src/app/layout.tsx` - Updated metadata
+- `src/lib/roex-engine.ts` - Rename demo key to local key
+- `package.json` - Remove drizzle-orm, pg deps
+- Deleted: `drizzle.config.json`, `src/db/`
+- Added: `.gitignore`
