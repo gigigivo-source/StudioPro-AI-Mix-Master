@@ -12,21 +12,15 @@ import {
   Pause,
   RotateCcw,
   Sparkles,
-  Zap,
   Activity,
   Layers,
   Music,
   Check,
   Disc,
-  Info,
-  Maximize2,
-  Share2,
   ShieldCheck,
-  FileText,
   Clock,
   Radio,
   BarChart2,
-  Wand2,
 } from "lucide-react";
 import confetti from "canvas-confetti";
 
@@ -101,9 +95,8 @@ export default function StudioProApp() {
   const [selectedAuditTrack, setSelectedAuditTrack] = useState<Track | null>(null);
   const [activeTab, setActiveTab] = useState<"METRICS" | "QC_GATE" | "SPECTRAL" | "STEMS">("METRICS");
 
-  // Load sample demo on first mount if wanted
+  // Sync dual audio elements for seamless A/B switching - user audio only
   useEffect(() => {
-    // Sync dual audio elements for seamless A/B switching
     const master = audioMasterRef.current;
     const orig = audioOriginalRef.current;
 
@@ -123,40 +116,6 @@ export default function StudioProApp() {
       if (orig) orig.removeEventListener("timeupdate", handleTimeUpdate);
     };
   }, [activeAudioSource]);
-
-  // Load quick demo project
-  const handleLoadDemo = async () => {
-    setIsUploading(true);
-    setUploadProgress(40);
-    try {
-      const formData = new FormData();
-      formData.append("demo", "true");
-      const res = await fetch("/api/upload", {
-        method: "POST",
-        body: formData,
-      });
-      setUploadProgress(100);
-      const data = await res.json();
-      if (data.success) {
-        setProject({
-          id: data.projectId,
-          name: data.projectName,
-          bpm: data.bpm,
-          musicalKey: data.musicalKey,
-          flmParsed: data.flmFound,
-          parserUsed: data.parserUsed,
-          status: "analyzed",
-          tracks: data.tracks,
-        });
-        setSelectedAuditTrack(data.tracks[0]);
-        setCurrentStep(2);
-      }
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setIsUploading(false);
-    }
-  };
 
   const [uploadStatusText, setUploadStatusText] = useState("Extracting binary structures & stems...");
 
@@ -186,15 +145,15 @@ export default function StudioProApp() {
 
     xhr.onload = () => {
       setUploadProgress(95);
-      setUploadStatusText("Parsing stems and running pre-mix acoustic audit...");
+      setUploadStatusText("Parsing your audio stems...");
 
       setTimeout(() => {
         try {
+          const data = JSON.parse(xhr.responseText);
           if (xhr.status >= 200 && xhr.status < 300) {
-            const data = JSON.parse(xhr.responseText);
             if (data.success) {
               setUploadProgress(100);
-              setUploadStatusText("Extraction complete! Initializing audit console...");
+              setUploadStatusText(`Found ${data.tracks?.length || 0} user tracks! Initializing audit console...`);
               setTimeout(() => {
                 setProject({
                   id: data.projectId,
@@ -212,16 +171,28 @@ export default function StudioProApp() {
               }, 400);
             } else {
               setIsUploading(false);
-              alert("Upload parsing note: " + (data.error || "Unable to extract stems."));
+              alert(data.error || "Unable to extract stems from your upload.");
             }
           } else {
+            // Handle 400 errors like "No audio tracks found..."
             setIsUploading(false);
-            alert(`Server upload returned status ${xhr.status}.`);
+            const errorMsg = data?.error || `Server returned status ${xhr.status}. No audio tracks found in your upload. Please check your ZIP file.`;
+            alert(errorMsg);
           }
         } catch (parseErr) {
           console.error("Response parse error:", parseErr);
           setIsUploading(false);
-          alert("Error parsing server response from upload.");
+          // Try to show raw response if JSON parse fails
+          try {
+            const raw = xhr.responseText;
+            if (raw.includes("No audio tracks found")) {
+              alert("No audio tracks found in your upload. Please check your ZIP file. Supported: WAV, MP3, FLAC, OGG, M4A, AAC.");
+            } else {
+              alert(`Upload failed (status ${xhr.status}). ${raw.substring(0, 200)}`);
+            }
+          } catch {
+            alert("Error parsing server response from upload.");
+          }
         }
       }, 300);
     };
@@ -268,6 +239,10 @@ export default function StudioProApp() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           projectId: project.id,
+          projectName: project.name,
+          bpm: project.bpm,
+          trackCount: project.tracks.length,
+          tracks: project.tracks, // Send actual user tracks to ensure no demo fallback
           musicalStyle,
           desiredLoudness: loudnessPreset,
           customLufs,
@@ -401,15 +376,12 @@ export default function StudioProApp() {
           <div className="flex items-center gap-3">
             <div className="hidden sm:flex items-center gap-2 text-xs text-slate-400 bg-slate-800/60 px-2.5 py-1 rounded-lg border border-slate-700/60">
               <Radio className="w-3.5 h-3.5 text-emerald-400 animate-ping" />
-              <span>RoEx Tonn + libsonare Active</span>
+              <span>User Audio Only • No Demo Tracks</span>
             </div>
-            <button
-              onClick={handleLoadDemo}
-              className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition flex items-center gap-1.5"
-            >
-              <Zap className="w-3.5 h-3.5 text-amber-400" />
-              Load Demo FLM Project
-            </button>
+            <div className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 flex items-center gap-1.5">
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+              Local-First Mode
+            </div>
           </div>
         </div>
       </header>
@@ -427,10 +399,10 @@ export default function StudioProApp() {
                   EBU R128 Compliant • Inter-sample Peak Protection
                 </div>
                 <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight text-white leading-tight">
-                  Commercial Mastering Rig for FL Studio Mobile Projects
+                  Commercial Mastering Rig for YOUR FL Studio Mobile Projects
                 </h1>
                 <p className="text-slate-300 text-sm sm:text-base leading-relaxed">
-                  Drop your FL Studio Mobile ZIP export (.flm + stems). Our dual-engine architecture parses binary track data, conducts a rigorous pre-mix acoustic diagnostic, and applies genre-adaptive AI summing calibrated for Spotify, Apple Music, and club sound systems.
+                  Drop YOUR FL Studio Mobile ZIP export (.flm + stems). This app processes ONLY your uploaded audio files - no demo tracks, no samples, no fallbacks. Our dual-engine architecture recursively extracts all WAV, MP3, FLAC, OGG, M4A, AAC from your ZIP (including subfolders), parses FLM metadata if present, and applies genre-adaptive AI summing.
                 </p>
                 <div className="flex flex-wrap gap-4 pt-2">
                   <div className="flex items-center gap-2 text-xs text-slate-400">
@@ -475,7 +447,7 @@ export default function StudioProApp() {
                 type="file"
                 ref={fileInputRef}
                 className="hidden"
-                accept=".zip,.flm,.wav,.mp3"
+                accept=".zip,.flm,.wav,.mp3,.flac,.ogg,.m4a,.aac,.aiff,.aif"
                 onChange={(e) => {
                   if (e.target.files && e.target.files[0]) {
                     handleFileUpload(e.target.files[0]);
@@ -488,17 +460,21 @@ export default function StudioProApp() {
               </div>
 
               <div className="space-y-1">
-                <h3 className="text-lg font-bold text-white">Drag & Drop FL Studio Mobile ZIP Export</h3>
+                <h3 className="text-lg font-bold text-white">Drag & Drop YOUR FL Studio Mobile ZIP</h3>
                 <p className="text-sm text-slate-400 max-w-md mx-auto">
-                  Accepts standard ZIP files containing <code className="text-indigo-300 font-mono">.flm</code> projects and exported WAV/MP3 track stems.
+                  Processes ONLY your uploaded files. Recursively extracts ALL audio from ZIP (including subfolders). Supported: <code className="text-indigo-300 font-mono">WAV, MP3, FLAC, OGG, M4A, AAC, AIFF</code> + <code className="text-indigo-300 font-mono">.flm</code> for metadata.
                 </p>
+                <p className="text-xs text-emerald-400 font-semibold">✓ No demo tracks • ✓ No fallback samples • ✓ Your audio only</p>
               </div>
 
-              <div className="flex items-center gap-3 text-xs text-slate-500 pt-2">
+              <div className="flex items-center gap-3 text-xs text-slate-500 pt-2 flex-wrap justify-center">
                 <span className="px-2.5 py-1 rounded-md bg-slate-800 border border-slate-700">.ZIP</span>
-                <span className="px-2.5 py-1 rounded-md bg-slate-800 border border-slate-700">.FLM</span>
-                <span className="px-2.5 py-1 rounded-md bg-slate-800 border border-slate-700">WAV (24/16-bit)</span>
-                <span className="px-2.5 py-1 rounded-md bg-slate-800 border border-slate-700">Up to 32 stems</span>
+                <span className="px-2.5 py-1 rounded-md bg-slate-800 border border-slate-700">.FLM (metadata)</span>
+                <span className="px-2.5 py-1 rounded-md bg-slate-800 border border-slate-700">WAV</span>
+                <span className="px-2.5 py-1 rounded-md bg-slate-800 border border-slate-700">MP3</span>
+                <span className="px-2.5 py-1 rounded-md bg-slate-800 border border-slate-700">FLAC</span>
+                <span className="px-2.5 py-1 rounded-md bg-slate-800 border border-slate-700">OGG/M4A/AAC</span>
+                <span className="px-2.5 py-1 rounded-md bg-emerald-900/30 border border-emerald-700/50 text-emerald-400">Up to 32 stems • User Only</span>
               </div>
 
               {isUploading && (
@@ -518,26 +494,6 @@ export default function StudioProApp() {
                   </div>
                 </div>
               )}
-            </div>
-
-            {/* Quick Demo Options */}
-            <div className="bg-slate-900/60 border border-slate-800/80 rounded-xl p-5 flex flex-col sm:flex-row items-center justify-between gap-4">
-              <div className="flex items-center gap-3 text-sm">
-                <Info className="w-5 h-5 text-indigo-400 shrink-0" />
-                <div>
-                  <span className="font-semibold text-slate-200">No ZIP handy right now?</span>
-                  <p className="text-xs text-slate-400">
-                    Instantly load our 10-stem studio test export (808, kick, snare, synths, lead vocals, harmonies).
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={handleLoadDemo}
-                className="w-full sm:w-auto px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg shadow-md transition flex items-center justify-center gap-2"
-              >
-                <Wand2 className="w-4 h-4" />
-                Try Interactive Studio Demo
-              </button>
             </div>
           </div>
         )}

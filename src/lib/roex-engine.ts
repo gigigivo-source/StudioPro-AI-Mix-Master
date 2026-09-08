@@ -32,7 +32,7 @@ export class AudioProductionEngine {
   private baseUrl = "https://tonn.roexaudio.com";
 
   constructor(apiKey?: string) {
-    this.apiKey = apiKey || process.env.ROEX_API_KEY || "demo_roex_studio_pro_key";
+    this.apiKey = apiKey || process.env.ROEX_API_KEY || "local_studio_pro_key";
   }
 
   /**
@@ -44,8 +44,8 @@ export class AudioProductionEngine {
     availableCredits: number;
     engineDescription: string;
   }> {
-    // If user provided a key or default studio mock key
-    const hasLiveKey = !!process.env.ROEX_API_KEY && process.env.ROEX_API_KEY !== "demo_roex_studio_pro_key";
+    // If user provided a key or default studio key (local-first, no demo)
+    const hasLiveKey = !!process.env.ROEX_API_KEY && process.env.ROEX_API_KEY !== "local_studio_pro_key";
     
     return {
       primaryActive: true,
