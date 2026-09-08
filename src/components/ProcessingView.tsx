@@ -1,8 +1,9 @@
 "use client";
 
-import { BadgeCheck, Check, Settings2, SlidersHorizontal, Timer } from "lucide-react";
+import { BadgeCheck, Check, Settings2, SlidersHorizontal, Timer, Sparkles } from "lucide-react";
 import { EqualizerBars } from "@/components/ui/EqualizerBars";
 import { formatEta } from "@/lib/format";
+import { AUTO_STAGE_LABELS } from "@/lib/plugin-orchestrator";
 import type { Stage } from "@/lib/types";
 
 const STAGES: { id: Stage; label: string; icon: typeof SlidersHorizontal }[] = [
@@ -18,15 +19,19 @@ export function ProcessingView({
   stage,
   status,
   eta,
+  autoStage,
   summary,
 }: {
   progress: number;
   stage: Stage;
   status: string;
   eta: number | null;
+  /** Current AI-engine stage index (0..9) when the automatic engine is running. */
+  autoStage?: number;
   summary: { genre: string; loudness: string; tracks: number };
 }) {
   const stageIndex = STAGE_ORDER.indexOf(stage);
+  const showAuto = autoStage != null && autoStage >= 0;
 
   return (
     <section className="glass fade-up rounded-3xl p-6 sm:p-8" aria-busy>
@@ -121,6 +126,57 @@ export function ProcessingView({
           {status}
         </span>
       </p>
+
+      {/* ---------------- AI engine timeline (10 stages) ---------------- */}
+      {showAuto && (
+        <div className="mt-6 rounded-2xl border border-line bg-surface/60 p-4">
+          <div className="mb-3 flex items-center gap-1.5">
+            <Sparkles size={13} style={{ color: "var(--sp-aqua)" }} />
+            <span className="text-[11px] font-bold uppercase tracking-[0.14em] text-mut">
+              Automatic Engine — Stage Timeline
+            </span>
+          </div>
+          <ol className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+            {AUTO_STAGE_LABELS.map((label, i) => {
+              const done = i < autoStage;
+              const active = i === autoStage;
+              return (
+                <li key={label} className="flex items-center gap-2">
+                  <span
+                    className="flex h-5 w-5 flex-none items-center justify-center rounded-full border text-[10px] font-bold"
+                    style={{
+                      background: done
+                        ? "rgba(52, 225, 176, 0.15)"
+                        : active
+                          ? "linear-gradient(135deg, var(--sp-accent), var(--sp-aqua))"
+                          : "var(--sp-surface-2)",
+                      borderColor: done
+                        ? "rgba(52,225,176,0.4)"
+                        : active
+                          ? "transparent"
+                          : "var(--sp-line)",
+                      color: done
+                        ? "var(--sp-ok)"
+                        : active
+                          ? "#fff"
+                          : "var(--sp-faint)",
+                    }}
+                  >
+                    {done ? <Check size={11} strokeWidth={3} /> : active ? <span className="blink">•</span> : i + 1}
+                  </span>
+                  <span
+                    className={`truncate text-[12px] font-medium ${
+                      active ? "text-ink" : done ? "text-mut" : "text-faint"
+                    }`}
+                  >
+                    {label}
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+      )}
 
       {/* ---------------- Session chips ---------------- */}
       <div className="mt-5 flex flex-wrap gap-2">

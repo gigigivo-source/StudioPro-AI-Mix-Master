@@ -2,13 +2,22 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import JSZip from "jszip";
-import { masterStereoPcm, sumTracks, type PcmData } from "@/lib/client-audio-engine";
+import { sumTracks, type PcmData } from "@/lib/client-audio-engine";
 import { measureAll, type Metrics } from "@/lib/analysis";
 import { wavBlob } from "@/lib/exports";
+import {
+  AUTO_STAGE_LABELS,
+  processAutoEngine,
+  type AutoReport,
+} from "@/lib/plugin-orchestrator";
 import type {
   MasterSession,
   Phase,
   Project,
+  SessionAuto,
+  SessionQa,
+  SessionStep,
+  SessionStem,
   Settings,
   Stage,
   TrackInfo,
@@ -85,6 +94,55 @@ const QC_STATUS = (f: number): string =>
       ? "Verifying mastered true peak…"
       : "Computing dynamic range & stereo width…";
 
+/** Numeric loudness target for a loudness key. */
+function targetLufsFor(loudness: string): number {
+  switch (loudness) {
+    case "CD":
+      return -9;
+    case "APPLE_MUSIC":
+      return -16;
+    case "SPOTIFY":
+    case "YOUTUBE":
+    default:
+      return -14;
+  }
+}
+
+/** Flatten the engine report into a lightweight, serialisable UI summary. */
+function buildSessionAuto(report: AutoReport): SessionAuto {
+  const mapStep = (s: { name: string; note?: string; params: Record<string, unknown>; order: number }): SessionStep => ({
+    name: s.name,
+    note: s.note,
+    params: s.params,
+    order: s.order,
+  });
+  const mapQa = (q: AutoReport["qa"]): SessionQa => ({
+    attempt: q.attempt,
+    passed: q.passed,
+    lufs: q.lufs,
+    lufsDelta: q.lufsDelta,
+    truePeakDb: q.truePeakDb,
+    correlation: q.correlation,
+    dynamicRange: q.dynamicRange,
+    failures: [...q.failures],
+  });
+  const stems: SessionStem[] = report.stems.map((s) => ({
+    name: s.name,
+    category: s.category,
+    categoryLabel: s.categoryLabel,
+    chainLabel: s.chainLabel,
+    steps: s.steps.map(mapStep),
+  }));
+  return {
+    bpm: report.bpm,
+    warnings: [...report.warnings],
+    stems,
+    masterSteps: report.masterSteps.map(mapStep),
+    qa: mapQa(report.qa),
+    attempts: report.qaAttempts.map(mapQa),
+  };
+}
+
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
 /* ------------------------------------------------------------------ */
@@ -97,13 +155,6 @@ function toPcm(buffer: AudioBuffer): PcmData {
     channels.push(new Float32Array(buffer.getChannelData(c)));
   }
   return { sampleRate: buffer.sampleRate, channels };
-}
-
-function clonePcm(pcm: PcmData): PcmData {
-  return {
-    sampleRate: pcm.sampleRate,
-    channels: pcm.channels.map((c) => new Float32Array(c)),
-  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -130,12 +181,15 @@ function StudioApp() {
   }>({ progress: 0, stage: "mixing", status: "" });
   const [eta, setEta] = useState<number | null>(null);
   const [session, setSession] = useState<MasterSession | null>(null);
+  /** Active auto-engine stage index (0-9) while processing, for the timeline. */
+  const [autoStage, setAutoStage] = useState<number>(0);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   /** Track preview URLs die with the project; session preview URLs die with the session. */
   const trackUrlsRef = useRef<string[]>([]);
   const sessionUrlsRef = useRef<string[]>([]);
   const progressRef = useRef({ p: 0, t: 0, rate: 0 });
+  const autoStatus = useRef<string>("");
 
   /* ---------------- audio context ---------------- */
 
@@ -309,6 +363,8 @@ function StudioApp() {
 
     setPhase("processing");
     setEta(null);
+    setAutoStage(0);
+    autoStatus.current = "";
     progressRef.current = { p: 0, t: performance.now(), rate: 0 };
 
     /** Report progress; keeps an EMA of the rate for the ETA estimate. */
@@ -341,27 +397,41 @@ function StudioApp() {
         report(7 + f * 3, "mixing", MIXING_STATUS(f))
       );
 
-      /* ---- Stage 2: MASTERING (10-88%) ---- */
+      /* ---- Stage 2: MASTERING (10-88%) — automatic plugin engine ---- */
       const lufsLabel =
         TARGET_LUFS_LABEL[settings.loudness] ?? settings.loudness;
-      report(10, "mastering", "Initializing mastering chain…");
+      const targetLufs = targetLufsFor(settings.loudness);
+      report(10, "mastering", "Auditing stems & detecting instrument categories…");
 
-      // Master a copy — originalPcm stays intact for the A/B comparison.
-      const work = clonePcm(originalPcm);
-      const masteredPcm = await masterStereoPcm(work, {
-        genre: settings.genre,
-        loudness: settings.loudness,
-        intensity: settings.intensity,
-        vocalFocus: settings.vocalFocus,
-        onProgress: (f) =>
-          report(10 + f * 78, "mastering", MASTERING_STATUS(f, lufsLabel)),
-      });
+      const autoReport: AutoReport = await processAutoEngine(
+        pcmTracks.map((p, i) => ({
+          name: project.tracks[i].name,
+          buffer: p,
+        })),
+        {
+          genre: settings.genre,
+          loudness: settings.loudness,
+          intensity: settings.intensity,
+          vocalFocus: settings.vocalFocus,
+          targetLufs,
+          onProgress: (f) =>
+            report(10 + f * 78, "mastering", autoStatus.current || MASTERING_STATUS(f, lufsLabel)),
+          onStatus: (msg) => {
+            autoStatus.current = msg;
+            setProcess((p) => ({ ...p, stage: "mastering", status: msg }));
+          },
+          onStage: (i) => setAutoStage(i),
+        }
+      );
+
+      const masteredPcm: PcmData = autoReport.master;
 
       /* ---- Stage 3: QC (88-100%) ---- */
       report(88, "qc", QC_STATUS(0));
       const after: Metrics = await measureAll(masteredPcm, (f) =>
         report(88 + f * 9, "qc", QC_STATUS(f))
       );
+      setAutoStage(AUTO_STAGE_LABELS.length - 1);
 
       report(97, "qc", "Rendering master WAV…");
       await tick(60);
@@ -387,6 +457,7 @@ function StudioApp() {
         sampleRate: masteredPcm.sampleRate,
         elapsedSec: (performance.now() - startedAt) / 1000,
         tracks: project.tracks.map((t) => ({ name: t.name, buffer: t.buffer })),
+        auto: buildSessionAuto(autoReport),
       };
 
       await tick(350);
@@ -398,6 +469,13 @@ function StudioApp() {
         title: "Mastering complete",
         message: "A/B comparison ready — compare, tweak, or export.",
       });
+      if (autoReport.warnings.length) {
+        toast({
+          type: "info",
+          title: "QA warning",
+          message: autoReport.warnings[autoReport.warnings.length - 1],
+        });
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(err);
@@ -462,6 +540,7 @@ function StudioApp() {
                   stage={process.stage}
                   status={process.status}
                   eta={eta}
+                  autoStage={process.stage === "mastering" ? autoStage : undefined}
                   summary={{
                     genre: settings.genre,
                     loudness: settings.loudness,

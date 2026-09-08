@@ -36,6 +36,7 @@ import {
 } from "@/lib/exports";
 import { formatDb, formatLufs } from "@/lib/format";
 import type { MasterSession, Theme } from "@/lib/types";
+import { AutoEnginePanel } from "@/components/AutoEnginePanel";
 
 /* ------------------------------------------------------------------ */
 /* Metric card                                                         */
@@ -439,6 +440,13 @@ export function ResultsDashboard({
           />
         </div>
       </div>
+
+      {/* ---------------- Automatic plugin engine (AI brain) ---------------- */}
+      {session.auto && (
+        <div className="fade-up" style={{ animationDelay: "220ms" }}>
+          <AutoEnginePanel auto={session.auto} />
+        </div>
+      )}
 
       {/* ---------------- Downloads ---------------- */}
       <div

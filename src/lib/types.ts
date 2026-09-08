@@ -47,6 +47,48 @@ export interface MasterSession {
   sampleRate: number;
   elapsedSec: number;
   tracks: { name: string; buffer: AudioBuffer }[];
+  /** Automatic plugin-engine report (populated when run on the AI engine). */
+  auto?: SessionAuto;
+}
+
+/* ------------------------------------------------------------------ *
+ * Auto plugin-engine UI report (serialisable, no audio payloads).
+ * ------------------------------------------------------------------ */
+
+export interface SessionStep {
+  name: string;
+  note?: string;
+  params: Record<string, unknown>;
+  order: number;
+}
+
+export interface SessionStem {
+  name: string;
+  category: string;
+  categoryLabel: string;
+  chainLabel: string;
+  steps: SessionStep[];
+}
+
+export interface SessionQa {
+  attempt: number;
+  passed: boolean;
+  lufs: number;
+  lufsDelta: number;
+  truePeakDb: number;
+  correlation: number;
+  dynamicRange: number;
+  failures: string[];
+}
+
+export interface SessionAuto {
+  bpm: number;
+  warnings: string[];
+  stems: SessionStem[];
+  /** Master-bus plugin decisions in order. */
+  masterSteps: SessionStep[];
+  qa: SessionQa;
+  attempts: SessionQa[];
 }
 
 export type Theme = "dark" | "light";
