@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   Activity,
   ArrowRight,
@@ -13,8 +13,12 @@ import {
   Gauge,
   Keyboard,
   Loader2,
+  RotateCcw,
   Settings2,
   UploadCloud,
+  Volume2,
+  Volume1,
+  VolumeX,
   Waves,
   Zap,
   type LucideIcon,
@@ -26,6 +30,7 @@ import {
   type PanelId,
   type WaveformHandle,
 } from "@/components/WaveformPanel";
+import { AudioVisualizer } from "@/components/AudioVisualizer";
 import {
   baseName,
   buildPdfReport,
@@ -44,7 +49,7 @@ import type { MasterSession, Theme } from "@/lib/types";
 type Tone = "accent" | "aqua" | "neutral";
 
 const TONE_CLASS: Record<Tone, { bg: string; color: string }> = {
-  accent: { bg: "rgba(108, 99, 255, 0.14)", color: "var(--sp-accent)" },
+  accent: { bg: "color-mix(in srgb, var(--sp-accent) 15%, transparent)", color: "var(--sp-accent)" },
   aqua: { bg: "rgba(0, 212, 255, 0.12)", color: "var(--sp-aqua)" },
   neutral: { bg: "var(--sp-surface-2)", color: "var(--sp-mut)" },
 };
@@ -77,12 +82,12 @@ function MetricCard({
           {label}
         </span>
       </div>
-      <div className="mt-3 flex items-center gap-2.5">
-        <span className="text-[13px] font-medium tabular-nums text-mut">
+      <div className="mt-3 flex items-center gap-2 sm:gap-2.5">
+        <span className="text-xs sm:text-[13px] font-medium tabular-nums text-mut">
           {before}
         </span>
         <ArrowRight size={13} className="flex-none text-faint" />
-        <span className="font-display text-xl font-bold tabular-nums text-ink">
+        <span className="font-display text-lg sm:text-xl font-bold tabular-nums text-ink">
           {after}
         </span>
         <span
@@ -161,12 +166,16 @@ export function ResultsDashboard({
   session,
   sourceName,
   theme,
+  initialVolume = 85,
+  onVolumeChange,
   onNewProject,
   onRemaster,
 }: {
   session: MasterSession;
   sourceName: string;
   theme: Theme;
+  initialVolume?: number;
+  onVolumeChange?: (vol: number) => void;
   onNewProject: () => void;
   onRemaster: () => void;
 }) {
@@ -179,11 +188,46 @@ export function ResultsDashboard({
     original: false,
     mastered: false,
   });
+  const [currentTime, setCurrentTime] = useState<Record<PanelId, number>>({
+    original: 0,
+    mastered: 0,
+  });
+  const [volume, setVolume] = useState<number>(initialVolume);
+  const [previousVolume, setPreviousVolume] = useState<number>(initialVolume || 85);
   const [busy, setBusy] = useState<Record<string, number>>({});
 
+  const isPlayingActive = playing[active];
+
+  // Sync volume with Waveform instances
+  const updateVolume = useCallback(
+    (newVol: number) => {
+      const clamped = Math.max(0, Math.min(100, newVol));
+      setVolume(clamped);
+      origRef.current?.setVolume(clamped / 100);
+      mastRef.current?.setVolume(clamped / 100);
+      onVolumeChange?.(clamped);
+    },
+    [onVolumeChange]
+  );
+
+  const toggleMute = useCallback(() => {
+    if (volume > 0) {
+      setPreviousVolume(volume);
+      updateVolume(0);
+    } else {
+      updateVolume(previousVolume || 80);
+    }
+  }, [volume, previousVolume, updateVolume]);
+
   const playState = useCallback(
-    (id: PanelId, isPlaying: boolean) =>
-      setPlaying((p) => ({ ...p, [id]: isPlaying })),
+    (id: PanelId, isNowPlaying: boolean) =>
+      setPlaying((p) => ({ ...p, [id]: isNowPlaying })),
+    []
+  );
+
+  const handleTimeUpdate = useCallback(
+    (id: PanelId, time: number) =>
+      setCurrentTime((t) => ({ ...t, [id]: time })),
     []
   );
 
@@ -196,11 +240,9 @@ export function ResultsDashboard({
     self.current?.playPause();
   }, []);
 
-  /* Space = play/pause the active panel. */
+  /* Keyboard shortcuts */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.code !== "Space" || e.repeat || e.metaKey || e.ctrlKey || e.altKey)
-        return;
       const t = e.target as HTMLElement | null;
       if (t) {
         const tag = t.tagName;
@@ -211,15 +253,34 @@ export function ResultsDashboard({
           tag === "BUTTON" ||
           tag === "A" ||
           t.isContentEditable
-        )
+        ) {
           return;
+        }
       }
-      e.preventDefault();
-      requestPlay(active);
+
+      if (e.code === "Space" && !e.repeat) {
+        e.preventDefault();
+        requestPlay(active);
+      } else if (e.code === "ArrowLeft") {
+        e.preventDefault();
+        const self = active === "original" ? origRef : mastRef;
+        self.current?.skip(-5);
+      } else if (e.code === "ArrowRight") {
+        e.preventDefault();
+        const self = active === "original" ? origRef : mastRef;
+        self.current?.skip(5);
+      } else if (e.code === "KeyM" && !e.repeat) {
+        e.preventDefault();
+        toggleMute();
+      } else if (e.code === "Escape") {
+        e.preventDefault();
+        onRemaster();
+      }
     };
+
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, requestPlay]);
+  }, [active, requestPlay, toggleMute, onRemaster]);
 
   /* ---------------- downloads ---------------- */
 
@@ -253,12 +314,12 @@ export function ResultsDashboard({
     switch (def.id) {
       case "wav16":
         void run(def.id, async () => {
-          downloadBlob(wavBlob(session.masteredPcm, 16), `${base}_mastered.wav`);
+          downloadBlob(wavBlob(session.masteredPcm, 16), `${base}_mastered_16bit.wav`);
         }, def.toastTitle);
         break;
       case "wav24":
         void run(def.id, async () => {
-          downloadBlob(wavBlob(session.masteredPcm, 24), `${base}_mastered.wav`);
+          downloadBlob(wavBlob(session.masteredPcm, 24), `${base}_mastered_24bit.wav`);
         }, def.toastTitle);
         break;
       case "mp3":
@@ -266,7 +327,7 @@ export function ResultsDashboard({
           def.id,
           async (p) => {
             const blob = await encodeMp3(session.masteredPcm, 320, p);
-            downloadBlob(blob, `${base}_mastered.mp3`);
+            downloadBlob(blob, `${base}_mastered_320k.mp3`);
           },
           def.toastTitle
         );
@@ -312,93 +373,156 @@ export function ResultsDashboard({
   const genreLabel = session.settings.genre.replace(/_/g, " ");
   const loudnessLabel = session.settings.loudness.replace(/_/g, " ");
 
+  const activePcm = active === "original" ? session.originalPcm : session.masteredPcm;
+  const activeCurrentTime = currentTime[active];
+
   return (
     <div className="space-y-6">
       {/* ---------------- Header ---------------- */}
-      <div className="fade-up flex flex-wrap items-center gap-4">
-        <span
-          className="pop flex h-12 w-12 flex-none items-center justify-center rounded-2xl"
-          style={{
-            background:
-              "linear-gradient(135deg, var(--sp-accent) 0%, #8a5cff 55%, var(--sp-aqua) 120%)",
-            boxShadow: "0 12px 32px -10px var(--sp-glow)",
-          }}
-        >
-          <CircleCheck size={24} strokeWidth={2.2} className="text-white" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <h1 className="font-display text-2xl font-bold tracking-tight text-ink">
-            Mastering complete
-          </h1>
-          <p className="mt-0.5 text-sm text-mut">
-            {session.tracks.length} {session.tracks.length === 1 ? "track" : "tracks"}{" "}
-            summed · {genreLabel} · {loudnessLabel} target · rendered in{" "}
-            {session.elapsedSec.toFixed(1)}s
-          </p>
+      <div className="fade-up flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3.5 min-w-0">
+          <span
+            className="pop flex h-12 w-12 flex-none items-center justify-center rounded-2xl"
+            style={{
+              background:
+                "linear-gradient(135deg, var(--sp-accent) 0%, #8a5cff 55%, var(--sp-aqua) 120%)",
+              boxShadow: "0 12px 32px -10px var(--sp-glow)",
+            }}
+          >
+            <CircleCheck size={24} strokeWidth={2.2} className="text-white" />
+          </span>
+          <div className="min-w-0">
+            <h1 className="font-display text-xl sm:text-2xl font-bold tracking-tight text-ink truncate">
+              Mastering Complete
+            </h1>
+            <p className="text-xs sm:text-sm text-mut truncate">
+              {session.tracks.length} {session.tracks.length === 1 ? "track" : "tracks"}{" "}
+              summed · {genreLabel} · {loudnessLabel} · in{" "}
+              {session.elapsedSec.toFixed(1)}s
+            </p>
+          </div>
         </div>
-        <div className="flex gap-2">
-          <button onClick={onRemaster} className="btn-ghost px-4 py-2.5 text-sm">
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button onClick={onRemaster} className="btn-ghost px-3.5 py-2 text-xs sm:text-sm">
             <Settings2 size={15} />
-            Change settings
+            Adjust settings
           </button>
-          <button onClick={onNewProject} className="btn-ghost px-4 py-2.5 text-sm">
+          <button onClick={onNewProject} className="btn-ghost px-3.5 py-2 text-xs sm:text-sm">
             <UploadCloud size={15} />
-            New project
+            New session
           </button>
         </div>
       </div>
 
-      {/* ---------------- A/B comparison ---------------- */}
-      <div className="fade-up" style={{ animationDelay: "60ms" }}>
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-[11px] font-bold uppercase tracking-[0.14em] text-faint">
-            A/B Comparison
-          </h2>
-          <p className="hidden items-center gap-1.5 text-[11px] font-medium text-faint sm:flex">
-            <Keyboard size={12} />
-            Space — play / pause active panel
-          </p>
+      {/* ---------------- A/B Comparison & Master Volume ---------------- */}
+      <div className="fade-up space-y-3" style={{ animationDelay: "60ms" }}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <h2 className="text-[11px] font-bold uppercase tracking-[0.14em] text-faint">
+              A/B Comparison
+            </h2>
+            <div className="hidden items-center gap-2 text-[11px] font-medium text-faint sm:flex">
+              <span className="rounded-md border border-line bg-surface px-1.5 py-0.5 text-[10px]">
+                Space
+              </span>
+              Play/Pause
+              <span className="rounded-md border border-line bg-surface px-1.5 py-0.5 text-[10px]">
+                ←/→
+              </span>
+              Skip 5s
+            </div>
+          </div>
+
+          {/* Volume Control */}
+          <div className="flex items-center gap-2.5 rounded-xl border border-line bg-surface px-3 py-1.5">
+            <button
+              onClick={toggleMute}
+              className="text-mut hover:text-ink transition-colors"
+              title={volume === 0 ? "Unmute (M)" : "Mute (M)"}
+              aria-label="Toggle mute"
+            >
+              {volume === 0 ? (
+                <VolumeX size={16} className="text-err" />
+              ) : volume < 50 ? (
+                <Volume1 size={16} />
+              ) : (
+                <Volume2 size={16} />
+              )}
+            </button>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              value={volume}
+              onChange={(e) => updateVolume(Number(e.target.value))}
+              className="sp-range w-20 sm:w-28"
+              style={{ "--fill": `${volume}%` } as CSSProperties}
+              aria-label="Master volume"
+              title={`Volume: ${volume}%`}
+            />
+            <span className="text-[11px] font-semibold tabular-nums text-mut w-7 text-right">
+              {volume}%
+            </span>
+          </div>
         </div>
+
+        {/* Waveform Panels */}
         <div className="grid gap-4 md:grid-cols-2">
           <WaveformPanel
             ref={origRef}
             id="original"
             tag="A"
-            label="Original"
+            label="Original Source"
             url={session.originalUrl}
             accent="muted"
             active={active === "original"}
             theme={theme}
+            volume={volume / 100}
             stats={[
               { label: "LUFS", value: formatLufs(before.lufs) },
               { label: "TP", value: `${formatDb(before.truePeakDb)} dBTP` },
             ]}
             onActivate={setActive}
             onPlayState={playState}
+            onTimeUpdate={handleTimeUpdate}
           />
           <WaveformPanel
             ref={mastRef}
             id="mastered"
             tag="B"
-            label="Mastered"
+            label="Studio Master"
             url={session.masteredUrl}
             accent="brand"
             active={active === "mastered"}
             theme={theme}
+            volume={volume / 100}
             stats={[
               { label: "LUFS", value: formatLufs(after.lufs) },
               { label: "TP", value: `${formatDb(after.truePeakDb)} dBTP` },
             ]}
             onActivate={setActive}
             onPlayState={playState}
+            onTimeUpdate={handleTimeUpdate}
           />
         </div>
       </div>
 
-      {/* ---------------- Metrics ---------------- */}
-      <div className="fade-up" style={{ animationDelay: "120ms" }}>
-        <h2 className="mb-3 text-[11px] font-bold uppercase tracking-[0.14em] text-faint">
-          Loudness Analysis
+      {/* ---------------- Live Spectrum Visualizer ---------------- */}
+      <div className="fade-up" style={{ animationDelay: "90ms" }}>
+        <AudioVisualizer
+          pcm={activePcm}
+          isPlaying={isPlayingActive}
+          currentTime={activeCurrentTime}
+          duration={session.durationSec}
+        />
+      </div>
+
+      {/* ---------------- Loudness Metrics ---------------- */}
+      <div className="fade-up space-y-3" style={{ animationDelay: "120ms" }}>
+        <h2 className="text-[11px] font-bold uppercase tracking-[0.14em] text-faint">
+          Loudness &amp; Dynamics Analysis
         </h2>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <MetricCard
@@ -447,10 +571,10 @@ export function ResultsDashboard({
       >
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-[11px] font-bold uppercase tracking-[0.14em] text-faint">
-            Export
+            Export Master
           </h2>
           <p className="text-[11px] font-medium text-faint">
-            All formats render locally, on demand
+            High-fidelity encoding rendered locally on-demand
           </p>
         </div>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">

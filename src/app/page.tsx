@@ -5,13 +5,22 @@ import JSZip from "jszip";
 import { masterStereoPcm, sumTracks, type PcmData } from "@/lib/client-audio-engine";
 import { measureAll, type Metrics } from "@/lib/analysis";
 import { wavBlob } from "@/lib/exports";
+import {
+  extractAudioEntries,
+  getExtension,
+  MIME_BY_EXTENSION,
+  readFileWithProgress,
+  validateFile,
+} from "@/lib/file-loader";
 import type {
+  BatchItem,
   MasterSession,
   Phase,
   Project,
   Settings,
   Stage,
   TrackInfo,
+  UploadProgress,
 } from "@/lib/types";
 import { Header } from "@/components/Header";
 import { useTheme } from "@/hooks/useTheme";
@@ -21,36 +30,42 @@ import { TrackList } from "@/components/TrackList";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { ProcessingView } from "@/components/ProcessingView";
 import { ResultsDashboard } from "@/components/ResultsDashboard";
+import { BatchQueueView } from "@/components/BatchQueueView";
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
 
-const AUDIO_EXTENSIONS = [
-  ".wav",
-  ".mp3",
-  ".flac",
-  ".ogg",
-  ".m4a",
-  ".aac",
-  ".aiff",
-  ".aif",
-  ".opus",
-  ".webm",
-];
+const SETTINGS_STORAGE_KEY = "studiopro-settings";
 
-const MIME_BY_EXTENSION: Record<string, string> = {
-  ".wav": "audio/wav",
-  ".mp3": "audio/mpeg",
-  ".flac": "audio/flac",
-  ".ogg": "audio/ogg",
-  ".m4a": "audio/mp4",
-  ".aac": "audio/aac",
-  ".aiff": "audio/aiff",
-  ".aif": "audio/aiff",
-  ".opus": "audio/ogg",
-  ".webm": "audio/webm",
+const DEFAULT_SETTINGS: Settings = {
+  genre: "POP",
+  loudness: "SPOTIFY",
+  intensity: 75,
+  vocalFocus: true,
+  volume: 85,
 };
+
+function readSavedSettings(): { settings: Settings; wasRestored: boolean } {
+  if (typeof window === "undefined") {
+    return { settings: DEFAULT_SETTINGS, wasRestored: false };
+  }
+  try {
+    const saved = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed && typeof parsed === "object") {
+        return {
+          settings: { ...DEFAULT_SETTINGS, ...parsed },
+          wasRestored: true,
+        };
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return { settings: DEFAULT_SETTINGS, wasRestored: false };
+}
 
 const TARGET_LUFS_LABEL: Record<string, string> = {
   SPOTIFY: "−14 LUFS",
@@ -107,50 +122,81 @@ function clonePcm(pcm: PcmData): PcmData {
 }
 
 /* ------------------------------------------------------------------ */
-/* App                                                                 */
+/* App Component                                                       */
 /* ------------------------------------------------------------------ */
 
 function StudioApp() {
   const { toast } = useToast();
-  const { theme, toggleTheme } = useTheme();
+  const { theme, toggleTheme, accent, setAccent } = useTheme();
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [project, setProject] = useState<Project | null>(null);
-  const [loadInfo, setLoadInfo] = useState<{ percent: number; message: string } | null>(null);
-  const [settings, setSettings] = useState<Settings>({
-    genre: "POP",
-    loudness: "SPOTIFY",
-    intensity: 75,
-    vocalFocus: true,
-  });
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
+
+  const [settings, setSettings] = useState<Settings>(() => readSavedSettings().settings);
+
   const [process, setProcess] = useState<{
     progress: number;
     stage: Stage;
     status: string;
   }>({ progress: 0, stage: "mixing", status: "" });
+
   const [eta, setEta] = useState<number | null>(null);
   const [session, setSession] = useState<MasterSession | null>(null);
 
+  // Batch processing state
+  const [batchItems, setBatchItems] = useState<BatchItem[]>([]);
+  const [batchIndex, setBatchIndex] = useState<number>(0);
+  const [isBatchProcessing, setIsBatchProcessing] = useState<boolean>(false);
+
+  // Abort Controllers
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  const processAbortRef = useRef<AbortController | null>(null);
+  const batchAbortRef = useRef<AbortController | null>(null);
+
   const audioCtxRef = useRef<AudioContext | null>(null);
-  /** Track preview URLs die with the project; session preview URLs die with the session. */
   const trackUrlsRef = useRef<string[]>([]);
   const sessionUrlsRef = useRef<string[]>([]);
   const progressRef = useRef({ p: 0, t: 0, rate: 0 });
 
-  /* ---------------- audio context ---------------- */
+  /* ---------------- Session Persistence (Initial Toast) ---------------- */
+
+  useEffect(() => {
+    const { wasRestored } = readSavedSettings();
+    if (wasRestored) {
+      toast({
+        type: "info",
+        title: "Settings restored",
+        message: "Loaded your previous mastering preferences.",
+      });
+    }
+  }, [toast]);
+
+  const updateSettings = useCallback((patch: Partial<Settings>) => {
+    setSettings((prev) => {
+      const next = { ...prev, ...patch };
+      try {
+        localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }, []);
+
+  /* ---------------- Audio Context ---------------- */
 
   const getAudioContext = useCallback((): AudioContext => {
     if (!audioCtxRef.current || audioCtxRef.current.state === "closed") {
       const Ctor: typeof AudioContext =
         window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext })
-          .webkitAudioContext;
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       audioCtxRef.current = new Ctor();
     }
     return audioCtxRef.current;
   }, []);
 
-  /* ---------------- blob URL bookkeeping ---------------- */
+  /* ---------------- Blob URL Bookkeeping ---------------- */
 
   const rememberTrackUrl = useCallback((url: string) => {
     trackUrlsRef.current.push(url);
@@ -177,103 +223,166 @@ function StudioApp() {
     releaseSessionUrls();
   }, [releaseSessionUrls, releaseTrackUrls]);
 
-  useEffect(
-    () => () => {
-      releaseAllUrls();
-    },
-    [releaseAllUrls]
-  );
+  useEffect(() => () => releaseAllUrls(), [releaseAllUrls]);
 
-  /* ---------------- load a project (ZIP or single audio file) ---------------- */
+  /* ---------------- Cancel Actions ---------------- */
+
+  const cancelUpload = useCallback(() => {
+    if (uploadAbortRef.current) {
+      uploadAbortRef.current.abort();
+      uploadAbortRef.current = null;
+    }
+    releaseAllUrls();
+    setProject(null);
+    setUploadProgress(null);
+    setPhase("idle");
+    toast({
+      type: "info",
+      title: "Upload cancelled",
+      message: "File upload was cancelled.",
+    });
+  }, [releaseAllUrls, toast]);
+
+  const cancelProcessing = useCallback(() => {
+    if (processAbortRef.current) {
+      processAbortRef.current.abort();
+      processAbortRef.current = null;
+    }
+    setEta(null);
+    setProcess({ progress: 0, stage: "mixing", status: "" });
+    setPhase(project ? "ready" : "idle");
+    toast({
+      type: "info",
+      title: "Processing cancelled",
+      message: "Mastering pipeline was cancelled.",
+    });
+  }, [project, toast]);
+
+  /* Keyboard shortcut for Escape to cancel */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (phase === "loading") {
+          cancelUpload();
+        } else if (phase === "processing") {
+          cancelProcessing();
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [phase, cancelUpload, cancelProcessing]);
+
+  /* ---------------- Load Project (Single File or ZIP) ---------------- */
 
   const loadProject = useCallback(
     async (file: File) => {
+      // 1. Validation
+      const validation = validateFile(file);
+      if (!validation.valid) {
+        toast({
+          type: "error",
+          title: "Invalid file",
+          message: validation.error || "Please select a supported audio or ZIP file.",
+        });
+        return;
+      }
+
       releaseAllUrls();
       setSession(null);
       setProject(null);
       setPhase("loading");
-      setLoadInfo({ percent: 4, message: "Reading file…" });
+
+      const abortController = new AbortController();
+      uploadAbortRef.current = abortController;
+      const signal = abortController.signal;
+
+      setUploadProgress({
+        loaded: 0,
+        total: file.size,
+        percent: 0,
+        speedMBs: 0,
+        etaSec: null,
+        stage: "reading",
+        message: "Starting upload & reading file…",
+      });
 
       try {
-        const lower = file.name.toLowerCase();
-        const isZip = lower.endsWith(".zip") || file.type.includes("zip");
+        // 2. Read with real streaming progress
+        const arrayBuffer = await readFileWithProgress(file, {
+          onProgress: (p) => setUploadProgress(p),
+          signal,
+        });
 
-        let raw: { name: string; data: ArrayBuffer }[] = [];
+        if (signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
 
-        if (isZip) {
-          const buf = await file.arrayBuffer();
-          const zip = await JSZip.loadAsync(buf);
-          setLoadInfo({ percent: 12, message: "Scanning ZIP contents…" });
+        // 3. Extract audio files
+        setUploadProgress((prev) => ({
+          loaded: file.size,
+          total: file.size,
+          percent: 100,
+          speedMBs: prev?.speedMBs || 0,
+          etaSec: null,
+          stage: "extracting",
+          message: validation.isZip ? "Unpacking ZIP stems…" : "Reading audio data…",
+        }));
 
-          for (const [path, entry] of Object.entries(zip.files)) {
-            if (entry.dir) continue;
-            // Skip OS junk that otherwise shows up as unreadable "tracks".
-            if (
-              path.includes("__MACOSX") ||
-              path.includes(".DS_Store") ||
-              path.startsWith(".")
-            )
-              continue;
-            const dot = path.lastIndexOf(".");
-            const ext = dot === -1 ? "" : path.slice(dot).toLowerCase();
-            if (!AUDIO_EXTENSIONS.includes(ext)) continue;
-            const data = await entry.async("arraybuffer");
-            raw.push({ name: path.split("/").pop() || path, data });
-          }
+        const rawEntries = await extractAudioEntries(arrayBuffer, file.name, {
+          onProgress: (p) => setUploadProgress(p),
+          signal,
+        });
 
-          if (raw.length === 0) {
-            throw new Error("No audio files found in that ZIP.");
-          }
-          setLoadInfo({
-            percent: 18,
-            message: `${raw.length} audio file${raw.length === 1 ? "" : "s"} found`,
-          });
-        } else {
-          const data = await file.arrayBuffer();
-          raw = [{ name: file.name, data }];
-          setLoadInfo({ percent: 18, message: "Audio file found" });
-        }
+        if (signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
 
+        // 4. Decode audio tracks
         const ctx = getAudioContext();
         const tracks: TrackInfo[] = [];
-        for (let i = 0; i < raw.length; i++) {
-          const f = raw[i];
-          setLoadInfo({
-            percent: 18 + 72 * (i / raw.length),
-            message: `Decoding ${f.name}…`,
+
+        for (let i = 0; i < rawEntries.length; i++) {
+          if (signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
+
+          const entry = rawEntries[i];
+          setUploadProgress({
+            loaded: file.size,
+            total: file.size,
+            percent: Math.round(((i + 1) / rawEntries.length) * 100),
+            speedMBs: 0,
+            etaSec: null,
+            stage: "decoding",
+            message: `Decoding track ${i + 1} of ${rawEntries.length} (${entry.name})…`,
           });
 
           let buffer: AudioBuffer;
           try {
-            // Copy: decodeAudioData may detach the buffer in some engines.
-            buffer = await ctx.decodeAudioData(f.data.slice(0));
+            buffer = await ctx.decodeAudioData(entry.data.slice(0));
           } catch {
             toast({
               type: "error",
-              title: `Skipped “${f.name}”`,
-              message: "Could not decode this file — it was left out of the session.",
+              title: `Could not decode “${entry.name}”`,
+              message: "This track could not be decoded and was omitted.",
             });
             continue;
           }
 
-          const dot = f.name.lastIndexOf(".");
-          const ext = dot === -1 ? "" : f.name.slice(dot).toLowerCase();
+          const ext = getExtension(entry.name);
           const mime = MIME_BY_EXTENSION[ext] ?? "audio/wav";
           const url = rememberTrackUrl(
-            URL.createObjectURL(new Blob([f.data], { type: mime }))
+            URL.createObjectURL(new Blob([entry.data], { type: mime }))
           );
+
           tracks.push({
-            name: f.name,
-            size: f.data.byteLength,
+            name: entry.name,
+            size: entry.data.byteLength,
             duration: buffer.duration,
             url,
             buffer,
           });
+
           await tick(16);
         }
 
         if (tracks.length === 0) {
-          throw new Error("No decodable audio files found.");
+          throw new Error("No decodable audio tracks found in this file.");
         }
 
         const totalDuration = Math.max(...tracks.map((t) => t.duration));
@@ -283,26 +392,223 @@ function StudioApp() {
           tracks,
           totalDuration,
         });
-        setLoadInfo({ percent: 100, message: "Ready" });
+
+        setUploadProgress(null);
         setPhase("ready");
+
         toast({
           type: "success",
-          title: "Project loaded",
-          message: `${tracks.length} track${tracks.length === 1 ? "" : "s"} ready — pick a profile and hit Mix & Master.`,
+          title: "Session loaded",
+          message: `${tracks.length} ${tracks.length === 1 ? "track" : "stems"} ready. Select mastering profile and start.`,
         });
       } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          return; // Handled by cancelUpload
+        }
         const message = err instanceof Error ? err.message : String(err);
         releaseAllUrls();
         setProject(null);
-        setLoadInfo(null);
+        setUploadProgress(null);
         setPhase("idle");
-        toast({ type: "error", title: "Could not read file", message });
+        toast({ type: "error", title: "Could not read audio session", message });
+      } finally {
+        uploadAbortRef.current = null;
       }
     },
     [getAudioContext, rememberTrackUrl, releaseAllUrls, toast]
   );
 
-  /* ---------------- mastering pipeline ---------------- */
+  /* ---------------- Multi-file / Batch Support ---------------- */
+
+  const handleFilesSelected = useCallback(
+    (files: File[]) => {
+      if (files.length === 1) {
+        void loadProject(files[0]);
+        return;
+      }
+
+      const validItems: BatchItem[] = [];
+      for (const file of files) {
+        const v = validateFile(file);
+        if (v.valid) {
+          validItems.push({
+            id: Math.random().toString(36).substring(2, 9),
+            file,
+            name: file.name,
+            size: file.size,
+            status: "queued",
+            progress: 0,
+          });
+        }
+      }
+
+      if (validItems.length === 0) {
+        toast({
+          type: "error",
+          title: "No valid audio files",
+          message: "None of the selected files were supported audio formats.",
+        });
+        return;
+      }
+
+      setBatchItems(validItems);
+      setBatchIndex(0);
+      setPhase("batch");
+      toast({
+        type: "info",
+        title: "Batch queue created",
+        message: `${validItems.length} tracks added to album mastering queue.`,
+      });
+    },
+    [loadProject, toast]
+  );
+
+  const startBatchProcess = useCallback(async () => {
+    if (batchItems.length === 0 || isBatchProcessing) return;
+
+    setIsBatchProcessing(true);
+    const abort = new AbortController();
+    batchAbortRef.current = abort;
+    const signal = abort.signal;
+
+    for (let i = 0; i < batchItems.length; i++) {
+      if (signal.aborted) break;
+
+      const item = batchItems[i];
+      if (item.status === "done") continue;
+
+      setBatchIndex(i);
+      setBatchItems((prev) =>
+        prev.map((it, idx) => (idx === i ? { ...it, status: "processing", progress: 5 } : it))
+      );
+
+      try {
+        const arrayBuf = await readFileWithProgress(item.file, {
+          onProgress: (p) => {
+            setBatchItems((prev) =>
+              prev.map((it, idx) =>
+                idx === i ? { ...it, progress: Math.min(25, p.percent * 0.25) } : it
+              )
+            );
+          },
+          signal,
+        });
+
+        const ctx = getAudioContext();
+        const buffer = await ctx.decodeAudioData(arrayBuf.slice(0));
+
+        setBatchItems((prev) =>
+          prev.map((it, idx) =>
+            idx === i ? { ...it, progress: 30, duration: buffer.duration } : it
+          )
+        );
+
+        const pcm = toPcm(buffer);
+        const originalPcm = clonePcm(pcm);
+
+        const before = await measureAll(
+          originalPcm,
+          (f) => {
+            setBatchItems((prev) =>
+              prev.map((it, idx) =>
+                idx === i ? { ...it, progress: 30 + f * 15 } : it
+              )
+            );
+          },
+          signal
+        );
+
+        const work = clonePcm(originalPcm);
+        const masteredPcm = await masterStereoPcm(work, {
+          genre: settings.genre,
+          loudness: settings.loudness,
+          intensity: settings.intensity,
+          vocalFocus: settings.vocalFocus,
+          signal,
+          onProgress: (f) => {
+            setBatchItems((prev) =>
+              prev.map((it, idx) =>
+                idx === i ? { ...it, progress: 45 + f * 45 } : it
+              )
+            );
+          },
+        });
+
+        const after = await measureAll(masteredPcm, undefined, signal);
+        const masterBlob = wavBlob(masteredPcm, 24);
+        const originalBlob = wavBlob(originalPcm, 16);
+
+        const masteredUrl = rememberSessionUrl(URL.createObjectURL(masterBlob));
+        const originalUrl = rememberSessionUrl(URL.createObjectURL(originalBlob));
+
+        const itemSession: MasterSession = {
+          settings: { ...settings },
+          originalPcm,
+          originalUrl,
+          masteredPcm,
+          masteredUrl,
+          before,
+          after,
+          durationSec: buffer.duration,
+          sampleRate: buffer.sampleRate,
+          elapsedSec: 0,
+          tracks: [{ name: item.name, buffer }],
+        };
+
+        setBatchItems((prev) =>
+          prev.map((it, idx) =>
+            idx === i
+              ? {
+                  ...it,
+                  status: "done",
+                  progress: 100,
+                  session: itemSession,
+                  masteredBlob: masterBlob,
+                }
+              : it
+          )
+        );
+      } catch (err) {
+        if (signal.aborted) break;
+        const msg = err instanceof Error ? err.message : String(err);
+        setBatchItems((prev) =>
+          prev.map((it, idx) =>
+            idx === i ? { ...it, status: "error", error: msg, progress: 0 } : it
+          )
+        );
+      }
+    }
+
+    setIsBatchProcessing(false);
+    batchAbortRef.current = null;
+    toast({
+      type: "success",
+      title: "Batch mastering finished",
+      message: "All queue items have completed.",
+    });
+  }, [
+    batchItems,
+    isBatchProcessing,
+    getAudioContext,
+    settings,
+    rememberSessionUrl,
+    toast,
+  ]);
+
+  const cancelBatchProcess = useCallback(() => {
+    if (batchAbortRef.current) {
+      batchAbortRef.current.abort();
+      batchAbortRef.current = null;
+    }
+    setIsBatchProcessing(false);
+    toast({
+      type: "info",
+      title: "Batch cancelled",
+      message: "Batch queue processing stopped.",
+    });
+  }, [toast]);
+
+  /* ---------------- Mastering Pipeline ---------------- */
 
   const startProcess = useCallback(async () => {
     if (!project || phase === "processing") return;
@@ -311,17 +617,24 @@ function StudioApp() {
     setEta(null);
     progressRef.current = { p: 0, t: performance.now(), rate: 0 };
 
+    const abortController = new AbortController();
+    processAbortRef.current = abortController;
+    const signal = abortController.signal;
+
     /** Report progress; keeps an EMA of the rate for the ETA estimate. */
     const report = (p: number, stage: Stage, status: string) => {
       const now = performance.now();
       const ref = progressRef.current;
       const dt = now - ref.t;
-      if (dt > 150 && p > ref.p + 0.01) {
+      if (dt > 120 && p > ref.p + 0.01) {
         const inst = (p - ref.p) / dt; // percent per ms
-        ref.rate = ref.rate === 0 ? inst : ref.rate * 0.6 + inst * 0.4;
+        ref.rate = ref.rate === 0 ? inst : ref.rate * 0.65 + inst * 0.35;
         ref.t = now;
         ref.p = p;
-        setEta(Math.max(0, (100 - p) / ref.rate / 1000));
+        if (ref.rate > 0) {
+          const remainingSec = (100 - p) / ref.rate / 1000;
+          setEta(Math.max(0, remainingSec));
+        }
       }
       setProcess({ progress: p, stage, status });
     };
@@ -330,46 +643,53 @@ function StudioApp() {
 
     try {
       /* ---- Stage 1: MIXING (0-10%) ---- */
-      report(2, "mixing", `Summing ${project.tracks.length} track${project.tracks.length === 1 ? "" : "s"} to stereo bus…`);
-      await tick(80);
+      report(
+        2,
+        "mixing",
+        `Summing ${project.tracks.length} track${project.tracks.length === 1 ? "" : "s"} to stereo bus…`
+      );
+      await tick(60);
 
       const pcmTracks = project.tracks.map((t) => toPcm(t.buffer));
       const originalPcm = sumTracks(pcmTracks);
 
       report(7, "mixing", MIXING_STATUS(0));
-      const before: Metrics = await measureAll(originalPcm, (f) =>
-        report(7 + f * 3, "mixing", MIXING_STATUS(f))
+      const before: Metrics = await measureAll(
+        originalPcm,
+        (f) => report(7 + f * 3, "mixing", MIXING_STATUS(f)),
+        signal
       );
 
       /* ---- Stage 2: MASTERING (10-88%) ---- */
-      const lufsLabel =
-        TARGET_LUFS_LABEL[settings.loudness] ?? settings.loudness;
+      const lufsLabel = TARGET_LUFS_LABEL[settings.loudness] ?? settings.loudness;
       report(10, "mastering", "Initializing mastering chain…");
 
-      // Master a copy — originalPcm stays intact for the A/B comparison.
       const work = clonePcm(originalPcm);
       const masteredPcm = await masterStereoPcm(work, {
         genre: settings.genre,
         loudness: settings.loudness,
         intensity: settings.intensity,
         vocalFocus: settings.vocalFocus,
+        signal,
         onProgress: (f) =>
           report(10 + f * 78, "mastering", MASTERING_STATUS(f, lufsLabel)),
       });
 
       /* ---- Stage 3: QC (88-100%) ---- */
       report(88, "qc", QC_STATUS(0));
-      const after: Metrics = await measureAll(masteredPcm, (f) =>
-        report(88 + f * 9, "qc", QC_STATUS(f))
+      const after: Metrics = await measureAll(
+        masteredPcm,
+        (f) => report(88 + f * 9, "qc", QC_STATUS(f)),
+        signal
       );
 
       report(97, "qc", "Rendering master WAV…");
-      await tick(60);
+      await tick(40);
       const masterWav = wavBlob(masteredPcm, 24);
       const originalWav = wavBlob(originalPcm, 16);
 
       report(99, "qc", "Preparing A/B comparison…");
-      await tick(60);
+      await tick(40);
       const masteredUrl = rememberSessionUrl(URL.createObjectURL(masterWav));
       const originalUrl = rememberSessionUrl(URL.createObjectURL(originalWav));
       report(100, "qc", "Quality check passed");
@@ -389,64 +709,94 @@ function StudioApp() {
         tracks: project.tracks.map((t) => ({ name: t.name, buffer: t.buffer })),
       };
 
-      await tick(350);
+      await tick(300);
       setSession(newSession);
       setEta(null);
       setPhase("done");
+
       toast({
         type: "success",
         title: "Mastering complete",
         message: "A/B comparison ready — compare, tweak, or export.",
       });
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        return; // Handled by cancelProcessing
+      }
       const message = err instanceof Error ? err.message : String(err);
-      console.error(err);
       setPhase(project ? "ready" : "idle");
-      toast({ type: "error", title: "Processing failed", message });
+      toast({ type: "error", title: "Mastering pipeline failed", message });
+    } finally {
+      processAbortRef.current = null;
     }
   }, [project, phase, settings, rememberSessionUrl, toast]);
 
-  /* ---------------- project lifecycle ---------------- */
+  /* ---------------- Project Lifecycle ---------------- */
 
   const clearProject = useCallback(() => {
     releaseAllUrls();
     setProject(null);
     setSession(null);
-    setLoadInfo(null);
+    setUploadProgress(null);
+    setBatchItems([]);
     setPhase("idle");
   }, [releaseAllUrls]);
 
   const remaster = useCallback(() => {
-    releaseSessionUrls(); // drops the session's preview URLs only
+    releaseSessionUrls();
     setSession(null);
     setPhase("ready");
   }, [releaseSessionUrls]);
 
-  /* ---------------- render ---------------- */
+  /* ---------------- Render ---------------- */
 
   return (
     <div className="min-h-dvh">
-      <Header theme={theme} onToggleTheme={toggleTheme} />
+      <Header
+        theme={theme}
+        onToggleTheme={toggleTheme}
+        accent={accent}
+        onSelectAccent={setAccent}
+      />
 
-      <main className="mx-auto max-w-6xl px-4 pb-10 pt-8 sm:px-6">
-        {phase === "done" && session ? (
+      <main className="mx-auto max-w-6xl px-4 pb-12 pt-6 sm:px-6 sm:pt-8">
+        {phase === "batch" ? (
+          <BatchQueueView
+            items={batchItems}
+            isProcessing={isBatchProcessing}
+            currentIndex={batchIndex}
+            settings={settings}
+            theme={theme}
+            onStartBatch={() => void startBatchProcess()}
+            onCancelBatch={cancelBatchProcess}
+            onRemoveItem={(id) => setBatchItems((prev) => prev.filter((it) => it.id !== id))}
+            onClearQueue={() => setBatchItems([])}
+            onNewProject={clearProject}
+          />
+        ) : phase === "done" && session ? (
           <ResultsDashboard
             session={session}
             sourceName={project?.fileName ?? "master"}
             theme={theme}
+            initialVolume={settings.volume ?? 85}
+            onVolumeChange={(vol) => updateSettings({ volume: vol })}
             onNewProject={clearProject}
             onRemaster={remaster}
           />
         ) : (
-          <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_400px]">
+          <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_390px] xl:grid-cols-[minmax(0,1fr)_420px]">
             <div className="space-y-5">
               <UploadZone
                 phase={phase}
                 project={project}
-                loadInfo={loadInfo}
+                uploadProgress={uploadProgress}
                 onFileSelected={(f) => void loadProject(f)}
+                onFilesSelected={handleFilesSelected}
+                onCancel={cancelUpload}
                 onClear={clearProject}
+                onError={(msg) => toast({ type: "error", title: "Upload error", message: msg })}
               />
+
               {(project || phase === "loading") && (
                 <TrackList
                   tracks={project?.tracks ?? null}
@@ -467,11 +817,12 @@ function StudioApp() {
                     loudness: settings.loudness,
                     tracks: project?.tracks.length ?? 0,
                   }}
+                  onCancel={cancelProcessing}
                 />
               ) : (
                 <SettingsPanel
                   settings={settings}
-                  onChange={(patch) => setSettings((s) => ({ ...s, ...patch }))}
+                  onChange={updateSettings}
                   onProcess={() => void startProcess()}
                   disabled={phase === "loading"}
                   hasProject={!!project && phase === "ready"}
@@ -483,8 +834,7 @@ function StudioApp() {
       </main>
 
       <footer className="pb-10 text-center text-[11px] font-medium text-faint">
-        StudioPro — professional mix &amp; master · runs 100% in your browser ·
-        audio never leaves your device
+        StudioPro — professional mix &amp; master · runs 100% in your browser · audio never leaves your device
       </footer>
     </div>
   );

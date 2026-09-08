@@ -6,7 +6,8 @@
  */
 
 import JSZip from "jszip";
-import * as lamejs from "@breezystack/lamejs";
+import { Mp3Encoder as LameMp3Encoder } from "@breezystack/lamejs";
+import * as lameModule from "@breezystack/lamejs";
 import { jsPDF } from "jspdf";
 
 type Mp3EncoderCtor = new (
@@ -19,20 +20,43 @@ type Mp3EncoderCtor = new (
 };
 
 /**
- * Resolve the LAME encoder across module interops (the package ships both an
- * ESM and a UMD build; bundlers may surface either).
+ * Resolve the LAME encoder across module interops.
  */
-function getMp3Encoder(): Mp3EncoderCtor {
-  const ns = lamejs as unknown as {
+async function getMp3Encoder(): Promise<Mp3EncoderCtor> {
+  if (typeof LameMp3Encoder === "function") {
+    return LameMp3Encoder as unknown as Mp3EncoderCtor;
+  }
+  const ns = lameModule as unknown as {
     Mp3Encoder?: Mp3EncoderCtor;
     default?: { Mp3Encoder?: Mp3EncoderCtor };
   };
-  const Ctor = ns.Mp3Encoder ?? ns.default?.Mp3Encoder;
-  if (typeof Ctor !== "function") {
-    throw new Error("MP3 encoder (lamejs) could not be loaded in this environment");
+  if (typeof ns?.Mp3Encoder === "function") {
+    return ns.Mp3Encoder;
   }
-  return Ctor;
+  if (typeof ns?.default?.Mp3Encoder === "function") {
+    return ns.default.Mp3Encoder;
+  }
+  try {
+    const dynamicMod = await import("@breezystack/lamejs");
+    if (typeof dynamicMod.Mp3Encoder === "function") {
+      return dynamicMod.Mp3Encoder as unknown as Mp3EncoderCtor;
+    }
+    if (typeof (dynamicMod as unknown as { default?: { Mp3Encoder?: Mp3EncoderCtor } }).default?.Mp3Encoder === "function") {
+      return (dynamicMod as unknown as { default: { Mp3Encoder: Mp3EncoderCtor } }).default.Mp3Encoder;
+    }
+  } catch {
+    /* fallback */
+  }
+  const globalMp3 =
+    (globalThis as unknown as { Mp3Encoder?: Mp3EncoderCtor }).Mp3Encoder ??
+    (globalThis as unknown as { lamejs?: { Mp3Encoder?: Mp3EncoderCtor } }).lamejs?.Mp3Encoder;
+  if (typeof globalMp3 === "function") {
+    return globalMp3;
+  }
+
+  throw new Error("MP3 encoder (lamejs) could not be loaded in this environment");
 }
+
 import {
   encodeWav,
   resample,
@@ -89,7 +113,7 @@ export async function encodeMp3(
   }
 
   const channels = work.channels.length;
-  const Encoder = getMp3Encoder();
+  const Encoder = await getMp3Encoder();
   const encoder = new Encoder(channels, work.sampleRate, kbps);
   const n = work.channels[0].length;
   const chunk = Math.max(1152, Math.floor(work.sampleRate * 0.25)); // 0.25 s
@@ -166,7 +190,7 @@ export async function buildStemsZip(
 /* ------------------------------------------------------------------ */
 
 export interface WaveformArt {
-  canvas: HTMLCanvasElement;
+  canvas?: HTMLCanvasElement;
   dataUrl: string;
 }
 
@@ -180,11 +204,16 @@ export function renderWaveformCanvas(
 ): WaveformArt {
   const width = opts.width ?? 640;
   const height = opts.height ?? 112;
+
+  if (typeof document === "undefined") {
+    return { dataUrl: "" };
+  }
+
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("Canvas 2D context unavailable");
+  if (!ctx) return { canvas, dataUrl: "" };
 
   ctx.fillStyle = opts.bg ?? "#12142a";
   ctx.fillRect(0, 0, width, height);
@@ -399,22 +428,26 @@ export function buildPdfReport(p: ReportParams): jsPDF {
     ACCENT
   );
 
-  // ---- Waveforms ----
+  // ---- Waveforms (if in browser) ----
   const imgW = W - 2 * M;
   const imgH = 88;
   const origArt = renderWaveformCanvas(p.originalPcm, { width: 1100, height: 140 });
   const mastArt = renderWaveformCanvas(p.masteredPcm, { width: 1100, height: 140 });
 
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(9);
-  doc.setTextColor(...ACCENT);
-  doc.text("WAVEFORM — ORIGINAL", M, y + 10);
-  doc.addImage(origArt.dataUrl, "PNG", M, y + 16, imgW, imgH);
-  y += 16 + imgH + 26;
+  if (origArt.dataUrl && mastArt.dataUrl) {
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9);
+    doc.setTextColor(...ACCENT);
+    doc.text("WAVEFORM — ORIGINAL", M, y + 10);
+    doc.addImage(origArt.dataUrl, "PNG", M, y + 16, imgW, imgH);
+    y += 16 + imgH + 26;
 
-  doc.text("WAVEFORM — MASTERED", M, y - 10);
-  doc.addImage(mastArt.dataUrl, "PNG", M, y, imgW, imgH);
-  y += imgH + 30;
+    doc.text("WAVEFORM — MASTERED", M, y - 10);
+    doc.addImage(mastArt.dataUrl, "PNG", M, y, imgW, imgH);
+    y += imgH + 30;
+  } else {
+    y += 20;
+  }
 
   // ---- Processing chain ----
   doc.setFont("helvetica", "bold");

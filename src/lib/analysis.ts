@@ -29,26 +29,39 @@ export interface PartialProgress {
 
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 
+function checkAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw new DOMException("Measurement cancelled by user", "AbortError");
+  }
+}
+
 /** LUFS, yielding to the event loop once so the UI can repaint first. */
-async function measureLufsAsync(pcm: PcmData): Promise<number> {
+async function measureLufsAsync(pcm: PcmData, signal?: AbortSignal): Promise<number> {
+  checkAborted(signal);
   await tick();
+  checkAborted(signal);
   return engineMeasureLufs(pcm);
 }
 
 /** True peak (linear -> dBTP), chunked so long files do not freeze the tab. */
 async function measureTruePeakAsync(
   pcm: PcmData,
-  onProgress?: PartialProgress
+  onProgress?: PartialProgress,
+  signal?: AbortSignal
 ): Promise<number> {
   const OS = 4;
   let peak = 0;
   let done = 0;
   const chunk = 2_000_000; // samples per channel per pass
 
+  if (!pcm.channels || pcm.channels.length === 0) return -120;
+
   for (const ch of pcm.channels) {
-    for (let i = 0; i < ch.length - 1; i += chunk) {
-      const end = Math.min(i + chunk, ch.length - 1);
-      for (let j = i; j < end; j++) {
+    if (ch.length === 0) continue;
+    for (let i = 0; i < ch.length; i += chunk) {
+      checkAborted(signal);
+      const end = Math.min(i + chunk, ch.length);
+      for (let j = i; j < end - 1; j++) {
         const a = ch[j];
         const b = ch[j + 1];
         const aAbs = Math.abs(a);
@@ -59,7 +72,7 @@ async function measureTruePeakAsync(
           if (v > peak) peak = v;
         }
       }
-      const last = Math.abs(ch[ch.length - 1] || 0);
+      const last = Math.abs(ch[end - 1] || 0);
       if (last > peak) peak = last;
       done += end - i;
       onProgress?.(Math.min(1, (done * pcm.channels.length) / (ch.length * pcm.channels.length)));
@@ -79,13 +92,19 @@ async function measureTruePeakAsync(
  */
 async function measureDrAndWidthAsync(
   pcm: PcmData,
-  onProgress?: PartialProgress
+  onProgress?: PartialProgress,
+  signal?: AbortSignal
 ): Promise<{ dynamicRange: number; stereoWidth: number }> {
-  const [l, r] = pcm.channels;
-  const n = l.length;
-  if (n < 1024) return { dynamicRange: 0, stereoWidth: pcm.channels.length < 2 ? 0 : 50 };
+  if (!pcm.channels || pcm.channels.length === 0) {
+    return { dynamicRange: 0, stereoWidth: 50 };
+  }
 
-  const block = Math.max(2048, Math.floor(pcm.sampleRate * 0.4));
+  const l = pcm.channels[0];
+  const r = pcm.channels[1] ?? l;
+  const n = l.length;
+  if (n < 256) return { dynamicRange: 0, stereoWidth: pcm.channels.length < 2 ? 0 : 50 };
+
+  const block = Math.max(512, Math.min(n, Math.floor(pcm.sampleRate * 0.4)));
   const numBlocks = Math.ceil(n / block);
   const blockDb = new Float32Array(numBlocks);
 
@@ -95,10 +114,12 @@ async function measureDrAndWidthAsync(
   const chunkBlocks = Math.max(1, Math.floor(numBlocks / 40));
 
   for (let b = 0; b < numBlocks; b += chunkBlocks) {
+    checkAborted(signal);
     const bEnd = Math.min(b + chunkBlocks, numBlocks);
     for (let bi = b; bi < bEnd; bi++) {
       const start = bi * block;
       const end = Math.min(start + block, n);
+      if (end <= start) continue;
       let sumL = 0;
       let sumR = 0;
       for (let i = start; i < end; i++) {
@@ -142,6 +163,8 @@ async function measureDrAndWidthAsync(
   if (active.length >= 4) {
     const p = (q: number) => active[Math.min(active.length - 1, Math.floor(q * (active.length - 1)))];
     dynamicRange = Math.max(0, p(0.95) - p(0.05));
+  } else if (active.length > 0) {
+    dynamicRange = Math.max(0, active[active.length - 1] - active[0]);
   }
 
   const corr = corrCount > 0 ? Math.min(1, Math.max(-1, corrSum / corrCount)) : 1;
@@ -153,26 +176,32 @@ async function measureDrAndWidthAsync(
 /** Full metrics bundle. Yields between measurements so the UI stays alive. */
 export async function measureAll(
   pcm: PcmData,
-  onProgress?: PartialProgress
+  onProgress?: PartialProgress,
+  signal?: AbortSignal
 ): Promise<Metrics> {
+  checkAborted(signal);
   let lufs = -120;
   let tp = 0;
   let drw = { dynamicRange: 0, stereoWidth: 0 };
   let completed = 0;
   const total = 3;
 
-  lufs = await measureLufsAsync(pcm);
+  lufs = await measureLufsAsync(pcm, signal);
   completed++;
   onProgress?.(completed / total);
 
-  tp = await measureTruePeakAsync(pcm, (f) =>
-    onProgress?.((completed + f) / total)
+  tp = await measureTruePeakAsync(
+    pcm,
+    (f) => onProgress?.((completed + f) / total),
+    signal
   );
   completed++;
   onProgress?.(completed / total);
 
-  drw = await measureDrAndWidthAsync(pcm, (f) =>
-    onProgress?.((completed + f) / total)
+  drw = await measureDrAndWidthAsync(
+    pcm,
+    (f) => onProgress?.((completed + f) / total),
+    signal
   );
 
   return {

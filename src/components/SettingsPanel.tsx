@@ -75,12 +75,12 @@ export function SettingsPanel({
   hasProject: boolean;
 }) {
   return (
-    <section className="glass space-y-7 rounded-3xl p-5 sm:p-6">
+    <section className="glass space-y-6 sm:space-y-7 rounded-3xl p-5 sm:p-6 shadow-xl">
       <div className="flex items-center justify-between">
         <h2 className="font-display text-base font-bold tracking-tight text-ink">
-          Mastering Settings
+          Mastering Profile
         </h2>
-        <Tooltip label="These controls drive the on-device mastering chain: genre EQ, dynamics, loudness normalization and true-peak limiting.">
+        <Tooltip label="These controls drive the on-device mastering chain: genre EQ, bus dynamics, loudness normalization and true-peak limiting.">
           <button className="btn-icon h-7 w-7" aria-label="About settings">
             <Info size={14} />
           </button>
@@ -89,8 +89,8 @@ export function SettingsPanel({
 
       {/* ---------------- Genre ---------------- */}
       <div>
-        <p className={`${SECTION_LABEL} mb-3`}>Genre</p>
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-3" role="radiogroup" aria-label="Genre">
+        <p className={`${SECTION_LABEL} mb-3`}>Genre Target</p>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-2 xl:grid-cols-3" role="radiogroup" aria-label="Genre">
           {GENRES.map((g) => {
             const Icon = g.icon;
             const selected = settings.genre === g.id;
@@ -130,8 +130,8 @@ export function SettingsPanel({
 
       {/* ---------------- Loudness target ---------------- */}
       <div>
-        <p className={`${SECTION_LABEL} mb-3`}>Loudness target</p>
-        <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Loudness target">
+        <p className={`${SECTION_LABEL} mb-3`}>Loudness Standard</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2" role="radiogroup" aria-label="Loudness target">
           {TARGETS.map((t) => {
             const Icon = t.icon;
             const selected = settings.loudness === t.id;
@@ -152,14 +152,14 @@ export function SettingsPanel({
                     className="flex h-9 w-9 flex-none items-center justify-center rounded-lg border border-line"
                     style={{
                       background: selected
-                        ? "linear-gradient(135deg, rgba(108,99,255,0.28), rgba(0,212,255,0.16))"
+                        ? "linear-gradient(135deg, color-mix(in srgb, var(--sp-accent) 28%, transparent), color-mix(in srgb, var(--sp-aqua) 16%, transparent))"
                         : "var(--sp-surface-2)",
                       color: selected ? "var(--sp-aqua)" : "var(--sp-mut)",
                     }}
                   >
                     <Icon size={17} />
                   </span>
-                  <span className="min-w-0">
+                  <span className="min-w-0 flex-1">
                     <span
                       className="block truncate text-[13px] font-semibold"
                       style={{ color: selected ? "var(--sp-ink)" : "var(--sp-mut)" }}
@@ -181,8 +181,8 @@ export function SettingsPanel({
       <div>
         <div className="mb-3 flex items-center justify-between">
           <p className={`${SECTION_LABEL} flex items-center gap-1.5`}>
-            Mixing intensity
-            <Tooltip label="How hard the chain works: 0% is a gentle polish, 100% is aggressive compression, saturation and loudness drive.">
+            Mastering Intensity
+            <Tooltip label="How hard the chain works: 0% is gentle acoustic polish, 100% is heavy analog saturation, multi-band compression and true-peak drive.">
               <button className="btn-icon h-5 w-5" aria-label="About intensity">
                 <Info size={12} />
               </button>
@@ -193,7 +193,7 @@ export function SettingsPanel({
               {intensityLabel(settings.intensity)}
             </span>
             <span className="text-gradient font-display text-xl font-bold tabular-nums">
-              {settings.intensity}
+              {settings.intensity}%
             </span>
           </span>
         </div>
@@ -207,7 +207,7 @@ export function SettingsPanel({
           onChange={(e) => onChange({ intensity: Number(e.target.value) })}
           className="sp-range"
           style={{ "--fill": `${settings.intensity}%` } as CSSProperties}
-          aria-label="Mixing intensity"
+          aria-label="Mastering intensity"
         />
         <div className="mt-2 flex justify-between text-[10px] font-medium tracking-wide text-faint">
           <span>Gentle</span>
@@ -220,10 +220,10 @@ export function SettingsPanel({
       {/* ---------------- Vocal focus ---------------- */}
       <div className="flex items-center justify-between gap-4 rounded-xl border border-line bg-surface p-4">
         <div>
-          <p className="text-[13px] font-semibold text-ink">Vocal focus</p>
+          <p className="text-[13px] font-semibold text-ink">Vocal Focus Clarity</p>
           <p className="mt-0.5 text-[11px] leading-relaxed text-mut">
             Lifts presence at 3 kHz and carves competing low-mids so vocals cut
-            through the mix.
+            through cleanly.
           </p>
         </div>
         <button
@@ -234,7 +234,7 @@ export function SettingsPanel({
           className="sp-switch"
           data-on={settings.vocalFocus}
           style={{ cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.55 : 1 }}
-          aria-label="Vocal focus"
+          aria-label="Vocal focus toggle"
         />
       </div>
 
@@ -250,7 +250,7 @@ export function SettingsPanel({
         </button>
         {!hasProject && (
           <p className="mt-2.5 text-center text-[11px] font-medium text-faint">
-            Load a project to unlock the mastering chain
+            Upload a track or session ZIP to unlock the mastering chain
           </p>
         )}
       </div>

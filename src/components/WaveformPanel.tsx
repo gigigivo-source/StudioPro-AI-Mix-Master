@@ -17,8 +17,14 @@ export type PanelId = "original" | "mastered";
 
 export interface WaveformHandle {
   playPause: () => void;
+  play: () => void;
   pause: () => void;
   isPlaying: () => boolean;
+  setVolume: (v: number) => void;
+  skip: (seconds: number) => void;
+  getCurrentTime: () => number;
+  getDuration: () => number;
+  getMediaElement: () => HTMLMediaElement | null;
 }
 
 interface Props {
@@ -29,9 +35,11 @@ interface Props {
   accent: "muted" | "brand";
   active: boolean;
   theme: Theme;
+  volume: number; // 0..1
   stats: { label: string; value: string }[];
   onActivate: (id: PanelId) => void;
   onPlayState: (id: PanelId, playing: boolean) => void;
+  onTimeUpdate?: (id: PanelId, currentTime: number) => void;
 }
 
 function palette(accent: "muted" | "brand", theme: Theme) {
@@ -39,23 +47,35 @@ function palette(accent: "muted" | "brand", theme: Theme) {
   if (accent === "brand") {
     return {
       wave: light ? "rgba(90, 80, 240, 0.35)" : "rgba(108, 99, 255, 0.42)",
-      progress: light ? "#5A50F0" : "#7A6FFF",
-      cursor: light ? "#009FD0" : "#00D4FF",
+      progress: light ? "var(--sp-accent)" : "var(--sp-accent)",
+      cursor: light ? "var(--sp-aqua)" : "var(--sp-aqua)",
     };
   }
   return {
     wave: light ? "rgba(100, 116, 139, 0.32)" : "rgba(148, 163, 184, 0.34)",
     progress: light ? "#64748B" : "#9AA6B8",
-    cursor: light ? "#009FD0" : "#00D4FF",
+    cursor: light ? "var(--sp-aqua)" : "var(--sp-aqua)",
   };
 }
 
 /**
- * One A/B comparison panel: Wavesurfer.js waveform + transport.
- * Pure presentation; the parent orchestrates exclusive playback.
+ * One A/B comparison panel: Wavesurfer.js waveform + transport + volume.
  */
 export const WaveformPanel = forwardRef<WaveformHandle, Props>(function WaveformPanel(
-  { id, tag, label, url, accent, active, theme, stats, onActivate, onPlayState },
+  {
+    id,
+    tag,
+    label,
+    url,
+    accent,
+    active,
+    theme,
+    volume,
+    stats,
+    onActivate,
+    onPlayState,
+    onTimeUpdate,
+  },
   ref
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -68,9 +88,30 @@ export const WaveformPanel = forwardRef<WaveformHandle, Props>(function Waveform
 
   useImperativeHandle(ref, () => ({
     playPause: () => wsRef.current?.playPause(),
+    play: () => wsRef.current?.play(),
     pause: () => wsRef.current?.pause(),
     isPlaying: () => wsRef.current?.isPlaying() ?? false,
+    setVolume: (v: number) => {
+      wsRef.current?.setVolume(Math.max(0, Math.min(1, v)));
+    },
+    skip: (seconds: number) => {
+      if (!wsRef.current) return;
+      const current = wsRef.current.getCurrentTime();
+      const dur = wsRef.current.getDuration();
+      const target = Math.max(0, Math.min(dur, current + seconds));
+      wsRef.current.setTime(target);
+    },
+    getCurrentTime: () => wsRef.current?.getCurrentTime() ?? 0,
+    getDuration: () => wsRef.current?.getDuration() ?? 0,
+    getMediaElement: () => wsRef.current?.getMediaElement() ?? null,
   }));
+
+  // Sync volume whenever prop changes
+  useEffect(() => {
+    if (wsRef.current) {
+      wsRef.current.setVolume(volume);
+    }
+  }, [volume]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -100,9 +141,15 @@ export const WaveformPanel = forwardRef<WaveformHandle, Props>(function Waveform
     });
 
     ws.on("decode", (dur) => setDuration(dur));
-    ws.on("ready", () => setReady(true));
+    ws.on("ready", () => {
+      setReady(true);
+      ws.setVolume(volume);
+    });
     ws.on("error", () => setFailed(true));
-    ws.on("timeupdate", (t) => setTime(t));
+    ws.on("timeupdate", (t) => {
+      setTime(t);
+      onTimeUpdate?.(id, t);
+    });
     ws.on("play", () => {
       setPlaying(true);
       onPlayState(id, true);
@@ -155,22 +202,25 @@ export const WaveformPanel = forwardRef<WaveformHandle, Props>(function Waveform
         >
           {tag}
         </span>
+
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold text-ink">{label}</p>
           <p className="text-[11px] font-medium tabular-nums text-faint">
             {stats.map((s) => s.value).join(" · ")}
           </p>
         </div>
+
         <span className="hidden text-[11px] font-medium tabular-nums text-faint sm:block">
           {formatDuration(time)} / {formatDuration(duration)}
         </span>
+
         <button
           onClick={(e) => {
             e.stopPropagation();
             onActivate(id);
             wsRef.current?.playPause();
           }}
-          className="btn-icon h-9 w-9 flex-none rounded-full border border-line bg-surface2"
+          className="btn-icon h-9 w-9 flex-none rounded-full border border-line bg-surface2 transition-transform active:scale-95"
           style={{ color: brand ? "var(--sp-aqua)" : "var(--sp-mut)" }}
           aria-label={`${playing ? "Pause" : "Play"} ${label}`}
         >
@@ -193,7 +243,7 @@ export const WaveformPanel = forwardRef<WaveformHandle, Props>(function Waveform
         )}
       </div>
 
-      <div className="mt-3 flex gap-2">
+      <div className="mt-3 flex flex-wrap gap-2">
         {stats.map((s) => (
           <span
             key={s.label}

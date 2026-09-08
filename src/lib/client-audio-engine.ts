@@ -36,6 +36,8 @@ export interface MasterOptions {
   vocalFocus: boolean;
   /** Optional 0..1 progress callback. */
   onProgress?: (fraction: number) => void;
+  /** Optional cancellation signal. */
+  signal?: AbortSignal;
 }
 
 export interface AudioTrackInput {
@@ -205,7 +207,7 @@ export function parseWav(arrayBuffer: ArrayBuffer): PcmData {
       view.getUint8(offset + 3)
     );
 
-  if (arrayBuffer.byteLength < 12) throw new Error("File too small to be a WAV");
+  if (arrayBuffer.byteLength < 12) throw new Error("File too small to be a WAV (minimum 12 bytes)");
   if (readTag(0) !== "RIFF" || readTag(8) !== "WAVE") {
     throw new Error("Not a valid RIFF/WAVE file");
   }
@@ -230,7 +232,7 @@ export function parseWav(arrayBuffer: ArrayBuffer): PcmData {
       bitsPerSample = view.getUint16(body + 14, true);
     } else if (chunkId === "data") {
       dataOffset = body;
-      dataLength = Math.min(chunkSize, view.byteLength - body);
+      dataLength = Math.min(chunkSize, Math.max(0, view.byteLength - body));
     }
 
     // Chunks are word-aligned.
@@ -543,16 +545,6 @@ function biquadProcess(f: Biquad, data: Float32Array): void {
   }
 }
 
-function makeBiquadPair(
-  type: "lowpass" | "highpass" | "lowshelf" | "highshelf" | "peaking",
-  freq: number,
-  q: number,
-  gainDb: number,
-  sampleRate: number
-): [Biquad, Biquad] {
-  return [makeBiquad(type, freq, q, gainDb, sampleRate), makeBiquad(type, freq, q, gainDb, sampleRate)];
-}
-
 /* ------------------------------------------------------------------ *
  * Loudness measurement (ITU-R BS.1770-4 approximation, gated)
  * ------------------------------------------------------------------ */
@@ -568,9 +560,11 @@ function kWeightFilters(sampleRate: number) {
 
 export function measureLufs(pcm: PcmData): number {
   const sampleRate = pcm.sampleRate;
-  const blockSize = Math.max(1, Math.floor(sampleRate * 0.4));
   const channels = pcm.channels;
+  if (!channels || channels.length === 0 || channels[0].length === 0) return -120;
+
   const length = channels[0].length;
+  const blockSize = Math.max(1, Math.floor(sampleRate * 0.4));
   const numBlocks = Math.ceil(length / blockSize);
   if (numBlocks === 0) return -120;
 
@@ -580,6 +574,7 @@ export function measureLufs(pcm: PcmData): number {
   for (let b = 0; b < numBlocks; b++) {
     const start = b * blockSize;
     const end = Math.min(start + blockSize, length);
+    if (end <= start) continue;
     let sum = 0;
 
     for (let c = 0; c < channels.length; c++) {
@@ -595,11 +590,16 @@ export function measureLufs(pcm: PcmData): number {
     blockPowers.push(sum);
   }
 
+  if (blockPowers.length === 0) return -120;
+
   const blockLufs = blockPowers.map((p) => -0.691 + 10 * Math.log10(Math.max(p, 1e-20)));
 
   // Absolute gate: -70 LUFS
   const gated1 = blockLufs.map((l, i) => (l > -70 ? blockPowers[i] : -1)).filter((p) => p >= 0);
-  if (gated1.length === 0) return -120;
+  if (gated1.length === 0) {
+    const avg = blockPowers.reduce((a, b) => a + b, 0) / blockPowers.length;
+    return -0.691 + 10 * Math.log10(Math.max(avg, 1e-20));
+  }
 
   const mean1 = gated1.reduce((a, b) => a + b, 0) / gated1.length;
   const relativeThreshold = -0.691 + 10 * Math.log10(Math.max(mean1, 1e-20)) - 10;
@@ -608,7 +608,9 @@ export function measureLufs(pcm: PcmData): number {
   const gated2 = blockLufs
     .map((l, i) => (l > -70 && l > relativeThreshold ? blockPowers[i] : -1))
     .filter((p) => p >= 0);
-  if (gated2.length === 0) return -120;
+  if (gated2.length === 0) {
+    return -0.691 + 10 * Math.log10(Math.max(mean1, 1e-20));
+  }
 
   const mean2 = gated2.reduce((a, b) => a + b, 0) / gated2.length;
   return -0.691 + 10 * Math.log10(Math.max(mean2, 1e-20));
@@ -618,7 +620,10 @@ export function measureLufs(pcm: PcmData): number {
 export function measureTruePeak(pcm: PcmData): number {
   const OS = 4;
   let peak = 0;
+  if (!pcm.channels || pcm.channels.length === 0) return 0;
+
   for (const ch of pcm.channels) {
+    if (ch.length === 0) continue;
     for (let i = 0; i < ch.length - 1; i++) {
       const a = ch[i];
       const b = ch[i + 1];
@@ -640,11 +645,14 @@ export function measureTruePeak(pcm: PcmData): number {
  * The mastering chain (stateful, processes segment-by-segment)
  * ------------------------------------------------------------------ */
 
-/* ------------------------------------------------------------------ *
- * Mastering pipeline
- * ------------------------------------------------------------------ */
-
 const yieldToUi = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+function checkAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    const err = new DOMException("Mastering cancelled by user", "AbortError");
+    throw err;
+  }
+}
 
 function resolveProfile(genre: string): GenreProfile {
   const key = (genre || "").toUpperCase();
@@ -667,7 +675,8 @@ async function applyToneAndDynamics(
   vocalFocus: boolean,
   onProgress?: (fraction: number) => void,
   progressStart = 0,
-  progressSpan = 1
+  progressSpan = 1,
+  signal?: AbortSignal
 ): Promise<void> {
   const sampleRate = pcm.sampleRate;
   const k = Math.min(Math.max(intensity, 0), 100) / 100;
@@ -719,6 +728,7 @@ async function applyToneAndDynamics(
   let processed = 0;
 
   for (let start = 0; start < length; start += segmentSize) {
+    checkAborted(signal);
     const end = Math.min(start + segmentSize, length);
     const n = end - start;
     const lSeg = left.subarray(start, end);
@@ -802,7 +812,8 @@ async function applyGain(
   gainLinear: number,
   onProgress?: (fraction: number) => void,
   progressStart = 0,
-  progressSpan = 1
+  progressSpan = 1,
+  signal?: AbortSignal
 ): Promise<void> {
   const channels = pcm.channels;
   const length = channels[0].length;
@@ -810,6 +821,7 @@ async function applyGain(
   let processed = 0;
 
   for (let start = 0; start < length; start += segmentSize) {
+    checkAborted(signal);
     const end = Math.min(start + segmentSize, length);
     for (const ch of channels) {
       for (let i = start; i < end; i++) ch[i] *= gainLinear;
@@ -825,13 +837,14 @@ async function applyGain(
  * Transparent for material well below `level`; shaves only the transients that
  * would otherwise force the whole master to be turned down.
  */
-async function softLimit(pcm: PcmData, level: number): Promise<void> {
+async function softLimit(pcm: PcmData, level: number, signal?: AbortSignal): Promise<void> {
   if (!Number.isFinite(level) || level <= 0) return;
   const channels = pcm.channels;
   const length = channels[0].length;
   const segmentSize = 262144;
 
   for (let start = 0; start < length; start += segmentSize) {
+    checkAborted(signal);
     const end = Math.min(start + segmentSize, length);
     for (const ch of channels) {
       for (let i = start; i < end; i++) {
@@ -855,23 +868,20 @@ function clampToCeiling(pcm: PcmData, ceilingLinear: number): void {
 /**
  * Bring the master to the target integrated loudness without exceeding the
  * true-peak ceiling.
- *
- * A pure linear gain scales true peak exactly, so once we know the measured
- * true peak we can hit the ceiling precisely without any nonlinear squashing.
- * A limiter is only engaged when the loudness target would otherwise push peaks
- * past the ceiling (i.e. the material is peak-bound).
  */
 async function normalizeLoudness(
   pcm: PcmData,
   targetLufs: number,
   onProgress?: (fraction: number) => void,
   progressStart = 0,
-  progressSpan = 1
+  progressSpan = 1,
+  signal?: AbortSignal
 ): Promise<void> {
   const ceilingLinear = dbToGain(TRUE_PEAK_CEILING_DBTP);
   const iterations = 3;
 
   for (let iter = 0; iter < iterations; iter++) {
+    checkAborted(signal);
     const before = progressStart + progressSpan * (iter / iterations);
     const span = progressSpan / iterations;
 
@@ -884,7 +894,7 @@ async function normalizeLoudness(
     const truePeak = measureTruePeak(pcm);
     if (truePeak > 0 && truePeak * gain > ceilingLinear) {
       // Limit to the pre-gain level that maps onto the output ceiling.
-      await softLimit(pcm, ceilingLinear / gain);
+      await softLimit(pcm, ceilingLinear / gain, signal);
       const lufsAfterLimit = measureLufs(pcm);
       gain = dbToGain(Math.max(-24, Math.min(24, targetLufs - lufsAfterLimit)));
       const peakAfterLimit = measureTruePeak(pcm);
@@ -894,7 +904,7 @@ async function normalizeLoudness(
       }
     }
 
-    await applyGain(pcm, gain, onProgress, before, span);
+    await applyGain(pcm, gain, onProgress, before, span, signal);
 
     const achieved = measureLufs(pcm);
     if (Math.abs(achieved - targetLufs) < 0.15) break;
@@ -907,10 +917,12 @@ async function normalizeLoudness(
 
 /** Core: take summed stereo PCM and master it. Mutates and returns `pcm`. */
 export async function masterStereoPcm(pcm: PcmData, options: MasterOptions): Promise<PcmData> {
+  checkAborted(options.signal);
   const stereo = toStereo(pcm);
   const profile = resolveProfile(options.genre);
   const targetLufs = resolveTargetLufs(options.loudness);
   const onProgress = options.onProgress;
+  const signal = options.signal;
 
   if (stereo.channels[0].length === 0) {
     throw new Error("Cannot master: audio is empty");
@@ -919,13 +931,15 @@ export async function masterStereoPcm(pcm: PcmData, options: MasterOptions): Pro
   onProgress?.(0.02);
 
   // Stage 1: tone shaping + bus dynamics (2% -> 60%)
-  await applyToneAndDynamics(stereo, profile, options.intensity, options.vocalFocus, onProgress, 0.02, 0.58);
+  await applyToneAndDynamics(stereo, profile, options.intensity, options.vocalFocus, onProgress, 0.02, 0.58, signal);
 
+  checkAborted(signal);
   onProgress?.(0.6);
 
   // Stage 2: loudness normalization + true-peak ceiling (60% -> 100%)
-  await normalizeLoudness(stereo, targetLufs, onProgress, 0.6, 0.4);
+  await normalizeLoudness(stereo, targetLufs, onProgress, 0.6, 0.4, signal);
 
+  checkAborted(signal);
   onProgress?.(1);
   return stereo;
 }
@@ -936,7 +950,6 @@ export async function masterStereoPcm(pcm: PcmData, options: MasterOptions): Pro
 
 /**
  * Master a set of WAV-encoded tracks.
- * Signature kept compatible with the UI's expectations.
  */
 export async function processTracks(
   audioTracks: AudioTrackInput[],
@@ -944,7 +957,8 @@ export async function processTracks(
   loudness: string,
   intensity: number,
   vocalFocus: boolean,
-  onProgress?: (fraction: number) => void
+  onProgress?: (fraction: number) => void,
+  signal?: AbortSignal
 ): Promise<Blob> {
   if (!audioTracks || audioTracks.length === 0) {
     throw new Error("No audio tracks supplied — nothing to master.");
@@ -952,6 +966,7 @@ export async function processTracks(
 
   const tracks: PcmData[] = [];
   for (let i = 0; i < audioTracks.length; i++) {
+    checkAborted(signal);
     const t = audioTracks[i];
     try {
       tracks.push(parseWav(t.data));
@@ -968,6 +983,7 @@ export async function processTracks(
     loudness,
     intensity,
     vocalFocus,
+    signal,
     onProgress: (f) => onProgress?.(0.1 + 0.9 * f),
   });
 
@@ -980,7 +996,7 @@ export async function processTracks(
  */
 export async function processAudioBuffers(
   tracks: DecodedTrackInput[],
-  options: { genre: string; loudness: string; intensity: number; vocalFocus: boolean },
+  options: { genre: string; loudness: string; intensity: number; vocalFocus: boolean; signal?: AbortSignal },
   onProgress?: (fraction: number) => void
 ): Promise<Blob> {
   if (!tracks || tracks.length === 0) {
@@ -998,6 +1014,7 @@ export async function processAudioBuffers(
     return { sampleRate: t.buffer.sampleRate, channels };
   });
 
+  options.signal?.aborted && checkAborted(options.signal);
   onProgress?.(0.05);
   const summed = sumTracks(pcmTracks);
   onProgress?.(0.1);

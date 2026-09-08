@@ -12,14 +12,21 @@ export const viewport: Viewport = {
   themeColor: "#0a0a0f",
 };
 
-/* Apply the saved theme before first paint (no flash). */
-const THEME_BOOT = `(function(){try{var t=localStorage.getItem("studiopro-theme");document.documentElement.setAttribute("data-theme",t==="light"?"light":"dark");}catch(e){document.documentElement.setAttribute("data-theme","dark");}})();`;
+/* Apply saved theme and accent before first paint (no flash). */
+const THEME_BOOT = `(function(){try{
+  var t=localStorage.getItem("studiopro-theme");
+  var a=localStorage.getItem("studiopro-accent");
+  document.documentElement.setAttribute("data-theme",t==="light"?"light":"dark");
+  if(a&&["purple","cyan","green","orange","pink"].indexOf(a)!==-1){
+    document.documentElement.setAttribute("data-accent",a);
+  }
+}catch(e){}})();`;
 
 export default function RootLayout({
   children,
 }: Readonly<{ children: ReactNode }>) {
   return (
-    <html lang="en" data-theme="dark" suppressHydrationWarning>
+    <html lang="en" data-theme="dark" data-accent="purple" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_BOOT }} />
       </head>

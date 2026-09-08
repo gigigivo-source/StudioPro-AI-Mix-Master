@@ -5,6 +5,7 @@
 /* ------------------------------------------------------------------ *\
  * StudioPro design tokens
  * Dark theme is the default; [data-theme="light"] switches the palette.
+ * data-accent switches accent colors (purple, cyan, green, orange, pink).
  * ------------------------------------------------------------------ */
 
 :root,
@@ -70,7 +71,60 @@
   --sp-err: #e12d4f;
 }
 
-/* Map tokens into Tailwind v4 utilities (bg-surface, text-ink, border-line, ...) */
+/* Accent Color Variations */
+:root[data-accent="cyan"] {
+  --sp-accent: #0284c7;
+  --sp-aqua: #00d4ff;
+  --sp-glow: rgba(2, 132, 199, 0.45);
+  --sp-glow-aqua: rgba(0, 212, 255, 0.35);
+}
+:root[data-theme="light"][data-accent="cyan"] {
+  --sp-accent: #0369a1;
+  --sp-aqua: #0284c7;
+  --sp-glow: rgba(3, 105, 161, 0.35);
+  --sp-glow-aqua: rgba(2, 132, 199, 0.25);
+}
+
+:root[data-accent="green"] {
+  --sp-accent: #10b981;
+  --sp-aqua: #34d399;
+  --sp-glow: rgba(16, 185, 129, 0.45);
+  --sp-glow-aqua: rgba(52, 211, 153, 0.35);
+}
+:root[data-theme="light"][data-accent="green"] {
+  --sp-accent: #059669;
+  --sp-aqua: #10b981;
+  --sp-glow: rgba(5, 150, 105, 0.35);
+  --sp-glow-aqua: rgba(16, 185, 129, 0.25);
+}
+
+:root[data-accent="orange"] {
+  --sp-accent: #f59e0b;
+  --sp-aqua: #fbbf24;
+  --sp-glow: rgba(245, 158, 11, 0.45);
+  --sp-glow-aqua: rgba(251, 191, 36, 0.35);
+}
+:root[data-theme="light"][data-accent="orange"] {
+  --sp-accent: #d97706;
+  --sp-aqua: #f59e0b;
+  --sp-glow: rgba(217, 119, 6, 0.35);
+  --sp-glow-aqua: rgba(245, 158, 11, 0.25);
+}
+
+:root[data-accent="pink"] {
+  --sp-accent: #ec4899;
+  --sp-aqua: #f472b6;
+  --sp-glow: rgba(236, 72, 153, 0.45);
+  --sp-glow-aqua: rgba(244, 114, 182, 0.35);
+}
+:root[data-theme="light"][data-accent="pink"] {
+  --sp-accent: #db2777;
+  --sp-aqua: #ec4899;
+  --sp-glow: rgba(219, 39, 119, 0.35);
+  --sp-glow-aqua: rgba(236, 72, 153, 0.25);
+}
+
+/* Map tokens into Tailwind utilities */
 @theme inline {
   --color-ink: var(--sp-ink);
   --color-mut: var(--sp-mut);
@@ -183,7 +237,7 @@ body {
   justify-content: center;
   gap: 0.5rem;
   border-radius: 14px;
-  background: linear-gradient(94deg, var(--sp-accent) 0%, #8a5cff 48%, var(--sp-aqua) 130%);
+  background: linear-gradient(94deg, var(--sp-accent) 0%, var(--sp-aqua) 130%);
   color: #fff;
   font-weight: 600;
   letter-spacing: 0.01em;
@@ -206,6 +260,28 @@ body {
 .btn-primary:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+/* Danger button */
+.btn-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 92, 122, 0.35);
+  background: rgba(255, 92, 122, 0.12);
+  color: var(--sp-err);
+  font-weight: 600;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+.btn-danger:hover:not(:disabled) {
+  background: rgba(255, 92, 122, 0.22);
+  border-color: rgba(255, 92, 122, 0.5);
+  transform: translateY(-1px);
+}
+.btn-danger:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 /* Ghost / secondary button */
@@ -252,7 +328,7 @@ body {
 /* Selected accent ring used by genre cards, target buttons, panels */
 .ring-accent {
   border-color: var(--sp-accent) !important;
-  background: linear-gradient(180deg, rgba(108, 99, 255, 0.16), rgba(0, 212, 255, 0.07)) !important;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--sp-accent) 18%, transparent), color-mix(in srgb, var(--sp-aqua) 8%, transparent)) !important;
   box-shadow:
     0 0 0 1px var(--sp-accent),
     0 8px 28px -12px var(--sp-glow);
@@ -302,18 +378,49 @@ body {
   0%,
   100% {
     box-shadow:
-      0 0 0 0 rgba(108, 99, 255, 0.5),
-      0 0 44px -12px rgba(0, 212, 255, 0.5);
+      0 0 0 0 color-mix(in srgb, var(--sp-accent) 50%, transparent),
+      0 0 44px -12px color-mix(in srgb, var(--sp-aqua) 50%, transparent);
   }
   50% {
     box-shadow:
-      0 0 0 14px rgba(108, 99, 255, 0),
-      0 0 64px -8px rgba(0, 212, 255, 0.6);
+      0 0 0 14px color-mix(in srgb, var(--sp-accent) 0%, transparent),
+      0 0 64px -8px color-mix(in srgb, var(--sp-aqua) 60%, transparent);
   }
 }
 .drag-active {
   border-color: var(--sp-accent) !important;
   animation: sp-drop-pulse 1.3s ease-in-out infinite;
+}
+
+@keyframes sp-drop-error-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(255, 92, 122, 0.5), 0 0 40px -10px rgba(255, 92, 122, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 12px rgba(255, 92, 122, 0), 0 0 54px -6px rgba(255, 92, 122, 0.6);
+  }
+}
+.drag-invalid {
+  border-color: var(--sp-err) !important;
+  animation: sp-drop-error-pulse 1.3s ease-in-out infinite;
+}
+
+@keyframes sp-drop-success {
+  0% {
+    transform: scale(0.98);
+    box-shadow: 0 0 0 0 var(--sp-ok);
+  }
+  50% {
+    transform: scale(1.02);
+    box-shadow: 0 0 35px 8px var(--sp-ok);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+.drop-success {
+  animation: sp-drop-success 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 /* Equalizer bars (active stage / live indicator) */
@@ -349,10 +456,10 @@ body {
 @keyframes sp-breathe {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(108, 99, 255, 0.55), 0 0 26px -6px var(--sp-glow);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--sp-accent) 55%, transparent), 0 0 26px -6px var(--sp-glow);
   }
   50% {
-    box-shadow: 0 0 0 6px rgba(108, 99, 255, 0.12), 0 0 34px -4px var(--sp-glow);
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--sp-accent) 12%, transparent), 0 0 34px -4px var(--sp-glow);
   }
 }
 .breathe {
@@ -420,7 +527,7 @@ body {
 }
 
 /* ------------------------------------------------------------------ *\
- * Range slider (mixing intensity)
+ * Range slider (mixing intensity / volume)
  * ------------------------------------------------------------------ */
 
 input[type="range"].sp-range {
@@ -446,13 +553,13 @@ input[type="range"].sp-range::-webkit-slider-thumb {
   border-radius: 50%;
   background: #fff;
   border: 3px solid var(--sp-accent);
-  box-shadow: 0 0 14px rgba(108, 99, 255, 0.75);
+  box-shadow: 0 0 14px var(--sp-glow);
   cursor: grab;
   transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
 input[type="range"].sp-range::-webkit-slider-thumb:hover {
   transform: scale(1.18);
-  box-shadow: 0 0 20px rgba(108, 99, 255, 0.95);
+  box-shadow: 0 0 20px var(--sp-glow);
 }
 input[type="range"].sp-range:active::-webkit-slider-thumb {
   cursor: grabbing;
@@ -463,7 +570,7 @@ input[type="range"].sp-range::-moz-range-thumb {
   border-radius: 50%;
   background: #fff;
   border: 3px solid var(--sp-accent);
-  box-shadow: 0 0 14px rgba(108, 99, 255, 0.75);
+  box-shadow: 0 0 14px var(--sp-glow);
   cursor: grab;
 }
 
@@ -506,7 +613,7 @@ input[type="range"].sp-range::-moz-range-thumb {
  * Misc
  * ------------------------------------------------------------------ */
 
-/* Tooltip (CSS-only, via .group/tt + .tt-bubble in markup) */
+/* Tooltip */
 .tt-bubble {
   opacity: 0;
   transform: translate(-50%, 4px);
@@ -519,7 +626,7 @@ input[type="range"].sp-range::-moz-range-thumb {
   transform: translate(-50%, 0);
 }
 
-/* Hide number input arrows (just in case) */
+/* Hide number input arrows */
 input[type="number"]::-webkit-outer-spin-button,
 input[type="number"]::-webkit-inner-spin-button {
   -webkit-appearance: none;
