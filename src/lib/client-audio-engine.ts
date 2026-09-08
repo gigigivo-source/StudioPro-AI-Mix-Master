@@ -657,6 +657,75 @@ function resolveTargetLufs(loudness: string): number {
 }
 
 /**
+ * Expose the exact, intensity-scaled parameters the bus chain will apply for a
+ * given profile + intensity. The stage-based pipeline (audio-processors.ts)
+ * reads this so its per-stage decision logs always reflect what the DSP core
+ * actually does — no drift between the narrative and the maths.
+ */
+export interface BusChainPlan {
+  subtractive: {
+    hpfFreq: number;
+    hpfQ: number;
+    mudCut: { freq: number; q: number; gain: number };
+  };
+  additive: {
+    lowShelf: { freq: number; gain: number };
+    presence: { freq: number; q: number; gain: number };
+    highShelf: { freq: number; gain: number };
+    vocalFocus: { freq: number; gain: number; enabled: boolean };
+  };
+  compression: { ratio: number; thresholdDb: number; kneeDb: number; attackMs: number; releaseMs: number };
+  saturation: { drive: number };
+  imaging: { width: number; monoCollapse: number };
+  loudness: { targetLufs: number; ceilingDb: number };
+}
+
+export function describeBusPlan(options: {
+  genre: string;
+  loudness: string;
+  intensity: number;
+  vocalFocus: boolean;
+}): BusChainPlan {
+  const profile = resolveProfile(options.genre);
+  const k = Math.min(Math.max(options.intensity, 0), 100) / 100;
+  const ratio = 1 + (profile.ratio - 1) * k;
+  return {
+    subtractive: {
+      hpfFreq: 20,
+      hpfQ: 0.707,
+      mudCut: {
+        freq: profile.mudCut.freq,
+        q: profile.mudCut.q,
+        gain: profile.mudCut.gain * k - (options.vocalFocus ? 0.8 * k : 0),
+      },
+    },
+    additive: {
+      lowShelf: { freq: profile.lowShelf.freq, gain: profile.lowShelf.gain * k },
+      presence: {
+        freq: profile.presence.freq,
+        q: profile.presence.q,
+        gain: profile.presence.gain * k,
+      },
+      highShelf: { freq: profile.highShelf.freq, gain: profile.highShelf.gain * k },
+      vocalFocus: { freq: 3000, gain: options.vocalFocus ? 2.2 * k : 0, enabled: options.vocalFocus },
+    },
+    compression: {
+      ratio,
+      thresholdDb: -18 + 6 * (1 - k),
+      kneeDb: 6,
+      attackMs: 3,
+      releaseMs: 120,
+    },
+    saturation: { drive: profile.saturation * k },
+    imaging: {
+      width: 1 + (profile.width - 1) * k,
+      monoCollapse: profile.monoCollapse * k,
+    },
+    loudness: { targetLufs: resolveTargetLufs(options.loudness), ceilingDb: TRUE_PEAK_CEILING_DBTP },
+  };
+}
+
+/**
  * Saturate + compress + EQ a stereo PCM (in place), segment by segment so the
  * browser can repaint and report progress.
  */
