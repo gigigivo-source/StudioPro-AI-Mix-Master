@@ -1,10 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import JSZip from "jszip";
-import { masterStereoPcm, sumTracks, type PcmData } from "@/lib/client-audio-engine";
-import { measureAll, type Metrics } from "@/lib/analysis";
-import { wavBlob } from "@/lib/exports";
+import dynamic from "next/dynamic";
+import type { PcmData } from "@/lib/client-audio-engine";
+import type { Metrics } from "@/lib/analysis";
 import type {
   MasterSession,
   Phase,
@@ -20,7 +19,13 @@ import { UploadZone } from "@/components/UploadZone";
 import { TrackList } from "@/components/TrackList";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { ProcessingView } from "@/components/ProcessingView";
-import { ResultsDashboard } from "@/components/ResultsDashboard";
+
+/** Results (wavesurfer / export codecs) load only after Mix & Master finishes. */
+const ResultsDashboard = dynamic(
+  () =>
+    import("@/components/ResultsDashboard").then((m) => m.ResultsDashboard),
+  { ssr: false }
+);
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
@@ -202,6 +207,7 @@ function StudioApp() {
 
         if (isZip) {
           const buf = await file.arrayBuffer();
+          const { default: JSZip } = await import("jszip");
           const zip = await JSZip.loadAsync(buf);
           setLoadInfo({ percent: 12, message: "Scanning ZIP contents…" });
 
@@ -333,6 +339,12 @@ function StudioApp() {
       report(2, "mixing", `Summing ${project.tracks.length} track${project.tracks.length === 1 ? "" : "s"} to stereo bus…`);
       await tick(80);
 
+      // Heavy DSP / analysis / WAV encoder — loaded only when Mix & Master runs.
+      const { masterStereoPcm, sumTracks, encodeWav } = await import(
+        "@/lib/client-audio-engine"
+      );
+      const { measureAll } = await import("@/lib/analysis");
+
       const pcmTracks = project.tracks.map((t) => toPcm(t.buffer));
       const originalPcm = sumTracks(pcmTracks);
 
@@ -365,6 +377,8 @@ function StudioApp() {
 
       report(97, "qc", "Rendering master WAV…");
       await tick(60);
+      const wavBlob = (pcm: PcmData, bitDepth: 16 | 24) =>
+        new Blob([encodeWav(pcm, bitDepth)], { type: "audio/wav" });
       const masterWav = wavBlob(masteredPcm, 24);
       const originalWav = wavBlob(originalPcm, 16);
 

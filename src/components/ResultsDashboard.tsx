@@ -26,14 +26,7 @@ import {
   type PanelId,
   type WaveformHandle,
 } from "@/components/WaveformPanel";
-import {
-  baseName,
-  buildPdfReport,
-  buildStemsZip,
-  downloadBlob,
-  encodeMp3,
-  wavBlob,
-} from "@/lib/exports";
+import { baseName, downloadBlob } from "@/lib/exports-lite";
 import { formatDb, formatLufs } from "@/lib/format";
 import type { MasterSession, Theme } from "@/lib/types";
 

@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import WaveSurfer from "wavesurfer.js";
+import type WaveSurfer from "wavesurfer.js";
 import { Pause, Play } from "lucide-react";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { formatDuration } from "@/lib/format";
@@ -83,42 +83,51 @@ export const WaveformPanel = forwardRef<WaveformHandle, Props>(function Waveform
     setPlaying(false);
 
     const colors = palette(accent, theme);
-    const ws = WaveSurfer.create({
-      container: el,
-      url,
-      waveColor: colors.wave,
-      progressColor: colors.progress,
-      cursorColor: colors.cursor,
-      cursorWidth: 2,
-      height: 96,
-      barWidth: 2,
-      barGap: 1,
-      barRadius: 2,
-      normalize: true,
-      autoScroll: false,
-      interact: true,
+    let cancelled = false;
+    let ws: WaveSurfer | null = null;
+
+    void import("wavesurfer.js").then((mod) => {
+      if (cancelled || !containerRef.current) return;
+      const WaveSurferCtor = mod.default;
+      ws = WaveSurferCtor.create({
+        container: el,
+        url,
+        waveColor: colors.wave,
+        progressColor: colors.progress,
+        cursorColor: colors.cursor,
+        cursorWidth: 2,
+        height: 96,
+        barWidth: 2,
+        barGap: 1,
+        barRadius: 2,
+        normalize: true,
+        autoScroll: false,
+        interact: true,
+      });
+
+      ws.on("decode", (dur) => setDuration(dur));
+      ws.on("ready", () => setReady(true));
+      ws.on("error", () => setFailed(true));
+      ws.on("timeupdate", (t) => setTime(t));
+      ws.on("play", () => {
+        setPlaying(true);
+        onPlayState(id, true);
+      });
+      ws.on("pause", () => {
+        setPlaying(false);
+        onPlayState(id, false);
+      });
+      ws.on("finish", () => {
+        setPlaying(false);
+        onPlayState(id, false);
+      });
+
+      wsRef.current = ws;
     });
 
-    ws.on("decode", (dur) => setDuration(dur));
-    ws.on("ready", () => setReady(true));
-    ws.on("error", () => setFailed(true));
-    ws.on("timeupdate", (t) => setTime(t));
-    ws.on("play", () => {
-      setPlaying(true);
-      onPlayState(id, true);
-    });
-    ws.on("pause", () => {
-      setPlaying(false);
-      onPlayState(id, false);
-    });
-    ws.on("finish", () => {
-      setPlaying(false);
-      onPlayState(id, false);
-    });
-
-    wsRef.current = ws;
     return () => {
-      ws.destroy();
+      cancelled = true;
+      ws?.destroy();
       wsRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
