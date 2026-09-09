@@ -66,6 +66,7 @@ export function UploadZone({
   );
 
   const showEmpty = phase === "idle" && !project;
+  const showLoadingCard = loading && !project;
 
   /* ------------------------------------------------ empty / drop zone */
   if (showEmpty) {
