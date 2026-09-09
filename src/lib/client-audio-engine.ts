@@ -435,6 +435,45 @@ export function sumTracks(tracks: PcmData[]): PcmData {
   return { sampleRate: targetRate, channels: [left, right] };
 }
 
+/** Empty stereo bus used by the streaming mixer. */
+export function createSilentStereo(sampleRate: number, frames: number): PcmData {
+  const n = Math.max(1, frames);
+  return {
+    sampleRate,
+    channels: [new Float32Array(n), new Float32Array(n)],
+  };
+}
+
+/**
+ * Mix one stem into the master bus, then the caller can drop the stem.
+ * Resamples to the master rate. Grows the master if this stem is longer.
+ */
+export function accumulateStereo(
+  master: PcmData,
+  track: PcmData,
+  gain: number
+): PcmData {
+  const stereo = toStereo(resample(track, master.sampleRate));
+  const need = stereo.channels[0].length;
+  let bus = master;
+  if (need > bus.channels[0].length) {
+    const left = new Float32Array(need);
+    const right = new Float32Array(need);
+    left.set(bus.channels[0]);
+    right.set(bus.channels[1]);
+    bus = { sampleRate: bus.sampleRate, channels: [left, right] };
+  }
+  const l = bus.channels[0];
+  const r = bus.channels[1];
+  const tl = stereo.channels[0];
+  const tr = stereo.channels[1];
+  for (let i = 0; i < tl.length; i++) {
+    l[i] += tl[i] * gain;
+    r[i] += tr[i] * gain;
+  }
+  return bus;
+}
+
 /* ------------------------------------------------------------------ *
  * Biquad filters (RBJ cookbook, Direct Form I, stateful across segments)
  * ------------------------------------------------------------------ */
@@ -950,19 +989,26 @@ export async function processTracks(
     throw new Error("No audio tracks supplied — nothing to master.");
   }
 
-  const tracks: PcmData[] = [];
-  for (let i = 0; i < audioTracks.length; i++) {
+  const n = audioTracks.length;
+  const gain = 1 / Math.sqrt(n);
+  let summed: PcmData | null = null;
+  for (let i = 0; i < n; i++) {
     const t = audioTracks[i];
+    let pcm: PcmData;
     try {
-      tracks.push(parseWav(t.data));
+      pcm = parseWav(t.data);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       throw new Error(`Could not decode "${t.fileName}": ${message}`);
     }
-    onProgress?.((0.05 * (i + 1)) / audioTracks.length);
+    if (!summed) {
+      summed = createSilentStereo(pcm.sampleRate, pcm.channels[0].length);
+    }
+    summed = accumulateStereo(summed, pcm, gain);
+    pcm = { sampleRate: pcm.sampleRate, channels: [] };
+    onProgress?.((0.08 * (i + 1)) / n);
   }
-
-  const summed = sumTracks(tracks);
+  if (!summed) throw new Error("No audio tracks supplied — nothing to master.");
   const mastered = await masterStereoPcm(summed, {
     genre,
     loudness,
@@ -987,7 +1033,11 @@ export async function processAudioBuffers(
     throw new Error("No audio loaded — nothing to master.");
   }
 
-  const pcmTracks: PcmData[] = tracks.map((t) => {
+  const n = tracks.length;
+  const gain = 1 / Math.sqrt(n);
+  let summed: PcmData | null = null;
+  for (let i = 0; i < n; i++) {
+    const t = tracks[i];
     if (!t.buffer || t.buffer.length === 0) {
       throw new Error(`Track "${t.fileName}" is empty — cannot master it.`);
     }
@@ -995,11 +1045,14 @@ export async function processAudioBuffers(
     for (let c = 0; c < t.buffer.numberOfChannels; c++) {
       channels.push(new Float32Array(t.buffer.getChannelData(c)));
     }
-    return { sampleRate: t.buffer.sampleRate, channels };
-  });
-
-  onProgress?.(0.05);
-  const summed = sumTracks(pcmTracks);
+    const pcm: PcmData = { sampleRate: t.buffer.sampleRate, channels };
+    if (!summed) {
+      summed = createSilentStereo(pcm.sampleRate, pcm.channels[0].length);
+    }
+    summed = accumulateStereo(summed, pcm, gain);
+    onProgress?.(0.08 * ((i + 1) / n));
+  }
+  if (!summed) throw new Error("No audio loaded — nothing to master.");
   onProgress?.(0.1);
 
   const mastered = await masterStereoPcm(summed, {

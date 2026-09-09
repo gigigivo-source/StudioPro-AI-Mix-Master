@@ -122,6 +122,7 @@ function StudioApp() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [project, setProject] = useState<Project | null>(null);
   const [loadInfo, setLoadInfo] = useState<{ percent: number; message: string } | null>(null);
+  const [loadFileName, setLoadFileName] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings>({
     genre: "POP",
     loudness: "SPOTIFY",
@@ -197,7 +198,9 @@ function StudioApp() {
       setSession(null);
       setProject(null);
       setPhase("loading");
+      setLoadFileName(file.name);
       setLoadInfo({ percent: 4, message: "Reading file…" });
+      await tick(16);
 
       try {
         const lower = file.name.toLowerCase();
@@ -206,38 +209,52 @@ function StudioApp() {
         let raw: { name: string; data: ArrayBuffer }[] = [];
 
         if (isZip) {
+          setLoadInfo({ percent: 6, message: "📦 Extracting ZIP…" });
+          await tick(16);
           const buf = await file.arrayBuffer();
           const { default: JSZip } = await import("jszip");
           const zip = await JSZip.loadAsync(buf);
-          setLoadInfo({ percent: 12, message: "Scanning ZIP contents…" });
+          setLoadInfo({ percent: 12, message: "📦 Scanning ZIP contents…" });
+          await tick(16);
 
-          for (const [path, entry] of Object.entries(zip.files)) {
-            if (entry.dir) continue;
-            // Skip OS junk that otherwise shows up as unreadable "tracks".
+          const entries = Object.entries(zip.files).filter(([path, entry]) => {
+            if (entry.dir) return false;
             if (
               path.includes("__MACOSX") ||
               path.includes(".DS_Store") ||
               path.startsWith(".")
             )
-              continue;
+              return false;
             const dot = path.lastIndexOf(".");
             const ext = dot === -1 ? "" : path.slice(dot).toLowerCase();
-            if (!AUDIO_EXTENSIONS.includes(ext)) continue;
+            return AUDIO_EXTENSIONS.includes(ext);
+          });
+
+          for (let i = 0; i < entries.length; i++) {
+            const [path, entry] = entries[i];
+            setLoadInfo({
+              percent: 12 + 20 * ((i + 1) / Math.max(1, entries.length)),
+              message: `📦 Extracting ${path.split("/").pop()} (${i + 1}/${entries.length})…`,
+            });
             const data = await entry.async("arraybuffer");
             raw.push({ name: path.split("/").pop() || path, data });
+            await tick(0);
           }
 
           if (raw.length === 0) {
             throw new Error("No audio files found in that ZIP.");
           }
           setLoadInfo({
-            percent: 18,
+            percent: 34,
             message: `${raw.length} audio file${raw.length === 1 ? "" : "s"} found`,
           });
+          await tick(16);
         } else {
+          setLoadInfo({ percent: 12, message: "Reading audio file…" });
           const data = await file.arrayBuffer();
           raw = [{ name: file.name, data }];
-          setLoadInfo({ percent: 18, message: "Audio file found" });
+          setLoadInfo({ percent: 34, message: "Audio file found" });
+          await tick(16);
         }
 
         const ctx = getAudioContext();
@@ -245,9 +262,10 @@ function StudioApp() {
         for (let i = 0; i < raw.length; i++) {
           const f = raw[i];
           setLoadInfo({
-            percent: 18 + 72 * (i / raw.length),
-            message: `Decoding ${f.name}…`,
+            percent: 34 + 60 * (i / raw.length),
+            message: `🎵 Decoding stem ${i + 1}/${raw.length} — ${f.name}`,
           });
+          await tick(16);
 
           let buffer: AudioBuffer;
           try {
@@ -262,6 +280,12 @@ function StudioApp() {
             continue;
           }
 
+          const duration = buffer.duration;
+          const sampleRate = buffer.sampleRate;
+          // Drop decoded PCM immediately — mix re-decodes one stem at a time.
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          buffer = null as unknown as AudioBuffer;
+
           const dot = f.name.lastIndexOf(".");
           const ext = dot === -1 ? "" : f.name.slice(dot).toLowerCase();
           const mime = MIME_BY_EXTENSION[ext] ?? "audio/wav";
@@ -271,9 +295,10 @@ function StudioApp() {
           tracks.push({
             name: f.name,
             size: f.data.byteLength,
-            duration: buffer.duration,
+            duration,
+            sampleRate,
             url,
-            buffer,
+            data: f.data,
           });
           await tick(16);
         }
@@ -291,6 +316,26 @@ function StudioApp() {
         });
         setLoadInfo({ percent: 100, message: "Ready" });
         setPhase("ready");
+
+        const mem =
+          typeof navigator !== "undefined"
+            ? (navigator as Navigator & { deviceMemory?: number }).deviceMemory
+            : undefined;
+        if (mem != null && mem < 1) {
+          toast({
+            type: "error",
+            title: "Limited device memory",
+            message:
+              "Your device has limited memory. Please use a desktop browser or reduce the project size.",
+          });
+        } else if (mem != null && mem < 2) {
+          toast({
+            type: "info",
+            title: "Large project on a small device",
+            message:
+              "This project may be large for your device. Processing may take a few minutes. For best results, use a desktop browser.",
+          });
+        }
         toast({
           type: "success",
           title: "Project loaded",
@@ -301,6 +346,7 @@ function StudioApp() {
         releaseAllUrls();
         setProject(null);
         setLoadInfo(null);
+        setLoadFileName(null);
         setPhase("idle");
         toast({ type: "error", title: "Could not read file", message });
       }
@@ -335,28 +381,99 @@ function StudioApp() {
     const startedAt = performance.now();
 
     try {
-      /* ---- Stage 1: MIXING (0-10%) ---- */
-      report(2, "mixing", `Summing ${project.tracks.length} track${project.tracks.length === 1 ? "" : "s"} to stereo bus…`);
-      await tick(80);
+      const mem =
+        typeof navigator !== "undefined"
+          ? (navigator as Navigator & { deviceMemory?: number }).deviceMemory
+          : undefined;
+      if (mem != null && mem < 1) {
+        toast({
+          type: "error",
+          title: "Limited device memory",
+          message:
+            "Your device has limited memory. Please use a desktop browser or reduce the project size.",
+        });
+      } else if (mem != null && mem < 2) {
+        toast({
+          type: "info",
+          title: "Processing on a small device",
+          message:
+            "This project may be large for your device. Processing may take a few minutes. For best results, use a desktop browser.",
+        });
+      }
 
-      // Heavy DSP / analysis / WAV encoder — loaded only when Mix & Master runs.
-      const { masterStereoPcm, sumTracks, encodeWav } = await import(
-        "@/lib/client-audio-engine"
+      const nTracks = project.tracks.length;
+      /* ---- Stage 1: MIXING (0-18%) — one stem at a time ---- */
+      report(
+        1,
+        "mixing",
+        `🎛️ Processing stem 1/${nTracks}…`
       );
+      await tick(40);
+
+      const {
+        masterStereoPcm,
+        encodeWav,
+        createSilentStereo,
+        accumulateStereo,
+      } = await import("@/lib/client-audio-engine");
       const { measureAll } = await import("@/lib/analysis");
 
-      const pcmTracks = project.tracks.map((t) => toPcm(t.buffer));
-      const originalPcm = sumTracks(pcmTracks);
+      const ctx = getAudioContext();
+      const mixGain = 1 / Math.sqrt(nTracks);
+      let originalPcm: PcmData | null = null;
 
-      report(7, "mixing", MIXING_STATUS(0));
+      for (let i = 0; i < nTracks; i++) {
+        const t = project.tracks[i];
+        const pct = 2 + (14 * i) / nTracks;
+        report(
+          pct,
+          "mixing",
+          `🎛️ Processing stem ${i + 1}/${nTracks}…  (${Math.round(((i) / nTracks) * 18)}%)`
+        );
+        await tick(0);
+
+        let decoded: AudioBuffer;
+        try {
+          decoded = await ctx.decodeAudioData(t.data.slice(0));
+        } catch {
+          throw new Error(`Could not decode “${t.name}” during mix.`);
+        }
+        const stem = toPcm(decoded);
+        decoded = null as unknown as AudioBuffer;
+
+        if (!originalPcm) {
+          originalPcm = createSilentStereo(
+            stem.sampleRate,
+            Math.max(
+              stem.channels[0].length,
+              ...project.tracks.map((tr) =>
+                Math.ceil(tr.duration * stem.sampleRate)
+              )
+            )
+          );
+        }
+        originalPcm = accumulateStereo(originalPcm, stem, mixGain);
+        stem.channels.length = 0;
+
+        report(
+          2 + (14 * (i + 1)) / nTracks,
+          "mixing",
+          `Processing: ${Math.round(((i + 1) / nTracks) * 18)}% (${i + 1} of ${nTracks} stems done)`
+        );
+        await tick(0);
+      }
+
+      if (!originalPcm) throw new Error("No audio to mix.");
+
+      report(16, "mixing", MIXING_STATUS(0));
       const before: Metrics = await measureAll(originalPcm, (f) =>
-        report(7 + f * 3, "mixing", MIXING_STATUS(f))
+        report(16 + f * 2, "mixing", MIXING_STATUS(f))
       );
 
-      /* ---- Stage 2: MASTERING (10-88%) ---- */
+      /* ---- Stage 2: MASTERING (18-88%) ---- */
       const lufsLabel =
         TARGET_LUFS_LABEL[settings.loudness] ?? settings.loudness;
-      report(10, "mastering", "Initializing mastering chain…");
+      report(18, "mastering", "Initializing mastering chain…");
 
       // Master a copy — originalPcm stays intact for the A/B comparison.
       const work = clonePcm(originalPcm);
@@ -366,7 +483,7 @@ function StudioApp() {
         intensity: settings.intensity,
         vocalFocus: settings.vocalFocus,
         onProgress: (f) =>
-          report(10 + f * 78, "mastering", MASTERING_STATUS(f, lufsLabel)),
+          report(18 + f * 70, "mastering", MASTERING_STATUS(f, lufsLabel)),
       });
 
       /* ---- Stage 3: QC (88-100%) ---- */
@@ -400,7 +517,7 @@ function StudioApp() {
         durationSec: frames / masteredPcm.sampleRate,
         sampleRate: masteredPcm.sampleRate,
         elapsedSec: (performance.now() - startedAt) / 1000,
-        tracks: project.tracks.map((t) => ({ name: t.name, buffer: t.buffer })),
+        tracks: project.tracks.map((t) => ({ name: t.name, data: t.data })),
       };
 
       await tick(350);
@@ -418,7 +535,7 @@ function StudioApp() {
       setPhase(project ? "ready" : "idle");
       toast({ type: "error", title: "Processing failed", message });
     }
-  }, [project, phase, settings, rememberSessionUrl, toast]);
+  }, [project, phase, settings, rememberSessionUrl, toast, getAudioContext]);
 
   /* ---------------- project lifecycle ---------------- */
 
@@ -427,6 +544,7 @@ function StudioApp() {
     setProject(null);
     setSession(null);
     setLoadInfo(null);
+    setLoadFileName(null);
     setPhase("idle");
   }, [releaseAllUrls]);
 
@@ -458,6 +576,7 @@ function StudioApp() {
                 phase={phase}
                 project={project}
                 loadInfo={loadInfo}
+                loadFileName={loadFileName}
                 onFileSelected={(f) => void loadProject(f)}
                 onClear={clearProject}
               />

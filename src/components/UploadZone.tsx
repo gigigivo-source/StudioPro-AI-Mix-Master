@@ -25,12 +25,14 @@ export function UploadZone({
   phase,
   project,
   loadInfo,
+  loadFileName,
   onFileSelected,
   onClear,
 }: {
   phase: Phase;
   project: Project | null;
   loadInfo: LoadInfo | null;
+  loadFileName?: string | null;
   onFileSelected: (file: File) => void;
   onClear: () => void;
 }) {
@@ -130,6 +132,51 @@ export function UploadZone({
           <ShieldCheck size={12} style={{ color: "var(--sp-ok)" }} />
           Processed locally in your browser — nothing is uploaded
         </p>
+      </section>
+    );
+  }
+
+  /* ------------------------------------------------ loading (no project yet) */
+  if (showLoadingCard) {
+    return (
+      <section className="glass rounded-3xl p-5 sm:p-6" aria-busy>
+        <div className="flex items-start gap-4">
+          <span
+            className="flex h-12 w-12 flex-none items-center justify-center rounded-xl"
+            style={{
+              background:
+                "linear-gradient(135deg, rgba(108,99,255,0.22), rgba(0,212,255,0.14))",
+              border: "1px solid var(--sp-line)",
+              color: "var(--sp-aqua)",
+            }}
+          >
+            <FileArchive size={22} strokeWidth={2} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-semibold text-ink">
+              {loadFileName || "Loading session…"}
+            </p>
+            <p className="mt-1.5 flex items-center gap-1.5 text-xs font-medium" style={{ color: "var(--sp-aqua)" }}>
+              <span className="blink inline-block h-1.5 w-1.5 rounded-full bg-aqua" />
+              {loadInfo?.message ?? "Reading file…"}
+            </p>
+            <div className="mt-3">
+              <div className="h-2 overflow-hidden rounded-full bg-surface2">
+                <div
+                  className="sheen h-full rounded-full transition-[width] duration-300 ease-out"
+                  style={{
+                    width: `${Math.min(100, loadInfo?.percent ?? 4)}%`,
+                    background:
+                      "linear-gradient(90deg, var(--sp-accent), var(--sp-aqua))",
+                  }}
+                />
+              </div>
+              <p className="mt-1.5 text-right text-[11px] font-medium tabular-nums text-faint">
+                {Math.round(loadInfo?.percent ?? 0)}%
+              </p>
+            </div>
+          </div>
+        </div>
       </section>
     );
   }

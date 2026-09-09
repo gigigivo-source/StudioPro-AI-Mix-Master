@@ -22,9 +22,11 @@ export interface TrackInfo {
   size: number;
   /** Seconds. */
   duration: number;
+  sampleRate: number;
   /** Blob URL for raw preview playback. */
   url: string;
-  buffer: AudioBuffer;
+  /** Encoded file bytes — re-decoded one stem at a time during mix. */
+  data: ArrayBuffer;
 }
 
 export interface Project {
@@ -46,7 +48,7 @@ export interface MasterSession {
   durationSec: number;
   sampleRate: number;
   elapsedSec: number;
-  tracks: { name: string; buffer: AudioBuffer }[];
+  tracks: { name: string; data: ArrayBuffer }[];
 }
 
 export type Theme = "dark" | "light";

@@ -36,7 +36,6 @@ function getMp3Encoder(): Mp3EncoderCtor {
 import {
   encodeWav,
   resample,
-  renderToWav,
   type PcmData,
 } from "./client-audio-engine";
 import type { Metrics } from "./analysis";
@@ -111,12 +110,12 @@ export async function encodeMp3(
 
 export interface StemTrack {
   name: string;
-  buffer: AudioBuffer;
+  data: ArrayBuffer;
 }
 
 /**
- * Bundle every source track as its own 24-bit WAV into a single ZIP
- * (per-track WAVs, no re-mixing — the individual stems exactly as decoded).
+ * Bundle every source track as its original encoded file into a ZIP.
+ * Does not re-decode (keeps memory flat).
  */
 export async function buildStemsZip(
   tracks: StemTrack[],
@@ -128,10 +127,8 @@ export async function buildStemsZip(
 
   for (let i = 0; i < tracks.length; i++) {
     const t = tracks[i];
-    const blob = renderToWav(t.buffer, 24);
-    const data = await blob.arrayBuffer();
-    folder.file(`${String(i + 1).padStart(2, "0")}_${t.name}`, data);
-    onProgress?.((i + 1) / tracks.length / 2); // encode half, zip half
+    folder.file(`${String(i + 1).padStart(2, "0")}_${t.name}`, t.data);
+    onProgress?.((i + 1) / tracks.length / 2);
     await new Promise<void>((r) => setTimeout(r, 0));
   }
 
